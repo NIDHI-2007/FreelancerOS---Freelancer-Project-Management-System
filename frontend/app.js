@@ -5,10 +5,7 @@
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
   const state = { token: localStorage.getItem('fmos_token'), user: JSON.parse(localStorage.getItem('fmos_user') || 'null'), page: 'home', charts: [], cache: {} };
   const authView = $('#authView'), appView = $('#appView'), pageContent = $('#pageContent');
-  const apiInput = $('#apiBase');
-  apiInput.value = localStorage.getItem('fmos_api') || `${location.origin === 'null' ? 'http://127.0.0.1:5000' : location.origin}/api`;
-  apiInput.addEventListener('change', () => localStorage.setItem('fmos_api', apiInput.value.trim().replace(/\/$/, '')));
-  const apiBase = () => (apiInput.value.trim() || 'http://127.0.0.1:5000/api').replace(/\/$/, '');
+  const apiBase = () => `${location.origin === 'null' ? 'http://127.0.0.1:5000' : location.origin}/api`;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = value => '$' + Number(value || 0).toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:2});
   const date = value => value ? new Date(value).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'}) : 'No deadline';
@@ -21,7 +18,7 @@
     if (state.token) headers.Authorization = `Bearer ${state.token}`;
     let response;
     try { response = await fetch(`${apiBase()}${path}`, {...options, headers}); }
-    catch { throw new Error('Cannot reach the Flask API. Start backend/run.py and confirm the API endpoint setting.'); }
+    catch { throw new Error('Cannot reach the Flask API. Make sure the Flask server is running.'); }
     let data = {};
     try { data = await response.json(); } catch {}
     if (!response.ok) {
@@ -53,10 +50,23 @@
     navigate(state.page || 'home'); refreshNotificationDot();
   }
   function signOut(callApi=true) {
-    if (callApi && state.token) post('/auth/logout',{}).catch(()=>{});
+    const logoutRequest = callApi && state.token ? post('/auth/logout',{}) : null;
     state.token=null; state.user=null; state.cache={}; localStorage.removeItem('fmos_token'); localStorage.removeItem('fmos_user');
-    authView.classList.remove('d-none'); appView.classList.add('d-none'); $('#authAlert').classList.add('d-none');
+    authView.classList.remove('d-none'); appView.classList.add('d-none');
+    $('#loginForm').reset(); $('#registerForm').reset(); $('#forgotPasswordForm').reset();
+    authTab('login');
+    $('#authAlert').classList.add('d-none');
+    if (location.hash || location.search) history.replaceState({}, document.title, location.pathname);
+    if (logoutRequest) logoutRequest.catch(error => showAuthMessage(`Signed out on this device, but server revocation failed: ${error.message}`, false));
   }
+  // Capture clicks early so logout remains responsive if a later dashboard
+  // component fails while registering its own handlers.
+  document.addEventListener('click',e=>{
+    const button=e.target.closest('#logoutBtn, #dashboardLogoutBtn');
+    if(!button)return;
+    e.preventDefault();
+    signOut(true);
+  },true);
   async function authenticate(form, mode) {
     const button=$('button[type="submit"]',form); button.disabled=true;
     try {
@@ -71,31 +81,20 @@
     const reg=mode==='register'; $$('.auth-tab').forEach(t=>t.classList.toggle('active',t.dataset.authTab===mode));
     $('.auth-tabs').classList.remove('d-none');
     $('#loginForm').classList.toggle('d-none',reg); $('#registerForm').classList.toggle('d-none',!reg);
-    $('#forgotPasswordForm').classList.add('d-none'); $('#resetPasswordForm').classList.add('d-none'); $('#resetPasswordForm').reset();
+    $('#forgotPasswordForm').classList.add('d-none'); $('#forgotPasswordForm').reset();
     $('#authTitle').textContent=reg?'Create your account':'Welcome back'; $('#authSubtitle').textContent=reg?'A few details and your workspace is ready.':'Enter your details to access your workspace.'; $('#authAlert').classList.add('d-none');
   }
   function showForgotPassword() {
-    $('.auth-tabs').classList.add('d-none'); $('#loginForm').classList.add('d-none'); $('#registerForm').classList.add('d-none'); $('#resetPasswordForm').classList.add('d-none');
+    $('.auth-tabs').classList.add('d-none'); $('#loginForm').classList.add('d-none'); $('#registerForm').classList.add('d-none');
     $('#forgotPasswordForm').classList.remove('d-none'); $('#authTitle').textContent='Reset your password';
-    $('#authSubtitle').textContent='Enter your account email and we’ll send a secure reset link if an account matches.'; $('#authAlert').classList.add('d-none');
-  }
-  function showResetPassword(token) {
-    $('.auth-tabs').classList.add('d-none'); $('#loginForm').classList.add('d-none'); $('#registerForm').classList.add('d-none'); $('#forgotPasswordForm').classList.add('d-none');
-    $('#resetPasswordForm').classList.remove('d-none'); $('#resetPasswordForm [name="token"]').value=token;
-    $('#authTitle').textContent='Choose a new password'; $('#authSubtitle').textContent='Set a new password for your FreelanceOS account.'; $('#authAlert').classList.add('d-none');
-    history.replaceState({}, document.title, location.pathname);
+    $('#authSubtitle').textContent='Enter your account email and choose a new password.'; $('#authAlert').classList.add('d-none');
   }
   async function requestPasswordReset(form) {
-    const button=$('button[type="submit"]',form); button.disabled=true;
-    try { await post('/auth/forgot-password',{email:new FormData(form).get('email')}); showAuthMessage('If an account matches that email, reset instructions will be sent.',true); form.reset(); }
-    catch(e) { showAuthError(e.message); } finally { button.disabled=false; }
-  }
-  async function setNewPassword(form) {
     const values=Object.fromEntries(new FormData(form).entries());
     if(values.password!==values.confirm_password) { showAuthError('The passwords do not match.'); return; }
-    const button=$('button[type="submit"]',form); button.disabled=true;
-    try { await post('/auth/reset-password',{token:values.token,password:values.password}); authTab('login'); showAuthMessage('Password reset. You can now sign in with your new password.',true); }
-    catch(e) { showAuthError(e.message); } finally { button.disabled=false; }
+    const button=$('button[type="submit"]',form),label=button.innerHTML; button.disabled=true;button.innerHTML='Resetting…';
+    try { await post('/auth/forgot-password',{email:values.email,new_password:values.password}); authTab('login'); showAuthMessage('Password reset successfully. Please log in.',true); }
+    catch(e) { showAuthError(e.message); } finally { button.disabled=false;button.innerHTML=label; }
   }
   function navigate(page) {
     state.page=page; $$('.nav-link').forEach(x=>x.classList.toggle('active',x.dataset.page===page));
@@ -110,7 +109,7 @@
   function stat(label,value,icon,color,foot='') { return `<div class="stat-card"><div class="stat-top"><span>${label}</span><span class="stat-icon ${color}">${icon}</span></div><div class="stat-value">${value}</div><div class="stat-foot">${foot}</div></div>`; }
   function panel(title,sub,content,chart=false) { return `<div class="panel-card"><div class="panel-title"><div><h3>${title}</h3><p>${sub}</p></div></div>${chart?`<div class="chart-wrap"><canvas id="${chart}"></canvas></div>`:content}</div>`; }
   function destroyCharts(){state.charts.forEach(c=>c.destroy());state.charts=[];}
-  function makeChart(id, labels, values, type='bar', color='#7565e8') { const canvas=$(`#${id}`); if(!canvas||!window.Chart)return; const chart=new Chart(canvas,{type,data:{labels,datasets:[{data:values,backgroundColor:type==='line'?color:labels.map((_,i)=>[color,'#a99ef3','#cec8fa','#e2defd'][i%4]),borderColor:color,borderWidth:type==='line'?2:0,borderRadius:6,tension:.35,fill:type==='line'?{target:'origin',above:'rgba(117,101,232,.08)'}:false,pointRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{font:{size:9},color:'#9aa1ae'}},y:{beginAtZero:true,grid:{color:'#f0f1f4'},ticks:{font:{size:9},color:'#9aa1ae',precision:0}}}}});state.charts.push(chart); }
+  function makeChart(id, labels, values, type='bar', color='#7565e8') { const canvas=$(`#${id}`); if(!canvas||!window.Chart)return; const chart=new Chart(canvas,{type,data:{labels,datasets:[{data:values,backgroundColor:type==='line'?color:labels.map((_,i)=>[color,'#a99ef3','#cec8fa','#e2defd'][i%4]),borderColor:color,borderWidth:type==='line'?2:0,borderRadius:6,tension:.35,fill:type==='line'?{target:'origin',above:'rgba(117,101,232,.08)'}:false,pointRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{font:{size:11},color:'#9aa1ae'}},y:{beginAtZero:true,grid:{color:'#f0f1f4'},ticks:{font:{size:11},color:'#9aa1ae',precision:0}}}}});state.charts.push(chart); }
   async function safe(path, key) { try { const d=await request(path); state.cache[key]=d; return d; } catch(e) { notify(e.message,'error'); return {}; } }
 
   async function renderHome() {
@@ -161,11 +160,15 @@
   async function renderProjects() {
     destroyCharts(); const client=state.user.role==='client';
     pageContent.innerHTML=`${heading(client?'Your projects':'Find your next project',client?'Manage project listings and review incoming applications.':'Explore open work that fits your skills.',client?button('+ New project','create-project'):'')}
-      ${client?'':`<div id="projectFilters" class="filter-bar"><input id="projectQuery" class="form-control filter-search" placeholder="Search projects by keyword…" aria-label="Search projects"><input id="projectCategory" class="form-control" type="number" min="1" placeholder="Category ID" aria-label="Category ID"><input id="projectBudgetMin" class="form-control" type="number" min="0" placeholder="Min budget" aria-label="Minimum budget"><input id="projectBudgetMax" class="form-control" type="number" min="0" placeholder="Max budget" aria-label="Maximum budget"><select id="projectSkills" class="form-select skill-filter" multiple size="3" aria-label="Filter by required skills"><option disabled>Loading skills…</option></select><select id="projectType" class="form-select" aria-label="Project type"><option value="">Any type</option><option value="fixed">Fixed price</option><option value="hourly">Hourly</option></select><select id="projectSort" class="form-select" aria-label="Sort projects"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="deadline">Deadline</option><option value="budget_low">Lowest budget</option><option value="budget_high">Highest budget</option></select><button class="btn btn-primary-soft" data-action="search-projects">Search</button></div>`}
+      ${client?'':`<div id="projectFilters" class="filter-bar"><input id="projectQuery" class="form-control filter-search" placeholder="Search projects by keyword…" aria-label="Search projects"><select id="projectCategory" class="form-select" aria-label="Filter by category"><option value="">All categories</option></select><input id="projectBudgetMin" class="form-control" type="number" min="0" placeholder="Min budget" aria-label="Minimum budget"><input id="projectBudgetMax" class="form-control" type="number" min="0" placeholder="Max budget" aria-label="Maximum budget"><select id="projectSkills" class="form-select skill-filter" multiple size="3" aria-label="Filter by required skills"><option disabled>Loading skills…</option></select><select id="projectType" class="form-select" aria-label="Project type"><option value="">Any type</option><option value="fixed">Fixed price</option><option value="hourly">Hourly</option></select><select id="projectSort" class="form-select" aria-label="Sort projects"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="deadline">Deadline</option><option value="budget_low">Lowest budget</option><option value="budget_high">Highest budget</option></select><button class="btn btn-primary-soft" data-action="search-projects">Search</button></div>`}
       <div id="projectResults" class="project-grid">${loadingState('Loading projects…')}</div>`;
     if(!client){
-      try{const {skills=[]}=await request('/skills');const select=$('#projectSkills');if(select)select.innerHTML=skills.map(s=>`<option value="${s.skill_id}">${esc(s.name)}</option>`).join('')||'<option disabled>No skills available</option>';}
-      catch(e){const select=$('#projectSkills');if(select)select.innerHTML='<option disabled>Skills unavailable</option>';notify(`Skill filters unavailable: ${e.message}`,'error');}
+      const [skillsResult,categoriesResult]=await Promise.allSettled([request('/skills'),request('/categories')]);
+      const skillSelect=$('#projectSkills'),categorySelect=$('#projectCategory');
+      if(skillsResult.status==='fulfilled')skillSelect.innerHTML=(skillsResult.value.skills||[]).map(s=>`<option value="${s.skill_id}">${esc(s.name)}</option>`).join('')||'<option disabled>No skills available</option>';
+      else{skillSelect.innerHTML='<option disabled>Skills unavailable</option>';notify(`Skill filters unavailable: ${skillsResult.reason.message}`,'error');}
+      if(categoriesResult.status==='fulfilled')categorySelect.innerHTML='<option value="">All categories</option>'+(categoriesResult.value.categories||[]).map(c=>`<option value="${c.category_id}">${esc(c.name)}</option>`).join('');
+      else notify(`Category filters unavailable: ${categoriesResult.reason.message}`,'error');
       $('#projectFilters').addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.id!=='projectSkills'){e.preventDefault();loadProjects();}});
     }
     await loadProjects();
@@ -176,7 +179,7 @@
     const searchButton=$('[data-action="search-projects"]');if(searchButton){searchButton.disabled=true;searchButton.textContent='Searching…';}
     if(!client){const params=new URLSearchParams({limit:'100',sort:$('#projectSort')?.value||'newest'}); const q=$('#projectQuery')?.value.trim(),cat=$('#projectCategory')?.value,min=$('#projectBudgetMin')?.value,max=$('#projectBudgetMax')?.value,type=$('#projectType')?.value;if(q)params.set('q',q);if(cat)params.set('category_id',cat);if(min)params.set('budget_min',min);if(max)params.set('budget_max',max);if(type)params.set('project_type',type);for(const option of ($('#projectSkills')?.selectedOptions||[]))params.append('skill_id',option.value);path=`/projects?${params}`;}
     try{const data=await request(path);state.cache.projects=data.projects||[];results.innerHTML=state.cache.projects.map(projectCard).join('')||empty(client?'No projects created':'No matching projects',client?'Create your first listing to get started.':'Try changing your keyword, category, budget, skills, or sort order.',client?button('Create project','create-project'):'');}
-    catch(e){results.innerHTML=empty('Projects could not load',esc(e.message));}
+    catch(e){results.innerHTML=empty('Unable to load projects',`${esc(e.message)} Please try again.`,button('Try again','search-projects','btn-outline-soft'));}
     finally{results.removeAttribute('aria-busy');if(searchButton){searchButton.disabled=false;searchButton.textContent='Search';}}
   }
   async function showApply(projectId,title) {
@@ -184,8 +187,10 @@
     $('#applyForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await post(`/projects/${projectId}/applications`,{proposal:f.get('proposal'),bid_amount:f.get('bid_amount'),estimated_days:Number(f.get('estimated_days'))});bootstrap.Modal.getInstance($('#formModal')).hide();notify('Application submitted.');}catch(err){notify(err.message,'error');}};
   }
   async function showProjectForm(project={}) {
-    const skills=await request('/skills').catch(()=>({skills:[]})); const existing=project.required_skills||[]; const selected=new Set(existing.map(s=>Number(s.skill_id)));
-    showForm(project.project_id?'Edit project':'Create a project',`<form id="projectForm" class="modal-form"><label>Project title<input class="form-control" name="title" maxlength="180" value="${esc(project.title||'')}" required></label><label>Description<textarea class="form-control" name="description" rows="3" required>${esc(project.description||'')}</textarea></label><div class="row g-2"><div class="col"><label>Category ID<input class="form-control" name="category_id" type="number" min="1" value="${esc(project.category_id||'1')}" required><small class="text-secondary">See Category table IDs in database seed.</small></label></div><div class="col"><label>Project type<select class="form-select" name="project_type"><option value="fixed" ${project.project_type==='hourly'?'':'selected'}>Fixed price</option><option value="hourly" ${project.project_type==='hourly'?'selected':''}>Hourly</option></select></label></div></div><div class="row g-2"><div class="col"><label>Minimum budget<input class="form-control" name="budget_min" type="number" min="0" step="0.01" value="${esc(project.budget_min||'')}" required></label></div><div class="col"><label>Maximum budget<input class="form-control" name="budget_max" type="number" min="0" step="0.01" value="${esc(project.budget_max||'')}" required></label></div></div><label>Deadline<input class="form-control" name="deadline" type="date" value="${esc(project.deadline||'')}"></label><label>Required skills<select class="form-select" name="skill_ids" multiple size="4">${(skills.skills||[]).map(s=>`<option value="${s.skill_id}" ${selected.has(Number(s.skill_id))?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label><button class="btn btn-primary-soft" type="submit">${project.project_id?'Save changes':'Publish project'}</button></form>`);
+    const [skills,categories]=await Promise.all([request('/skills').catch(()=>({skills:[]})),request('/categories').catch(()=>({categories:[]}))]); const existing=project.required_skills||[]; const selected=new Set(existing.map(s=>Number(s.skill_id)));
+    const categoryOptions=(categories.categories||[]).map(c=>`<option value="${c.category_id}" ${Number(project.category_id)===Number(c.category_id)?'selected':''}>${esc(c.name)}</option>`).join('');
+    const fallbackCategory=project.category_id&&!categoryOptions?`<option value="${esc(project.category_id)}" selected>${esc(project.category_name||'Current category')}</option>`:'';
+    showForm(project.project_id?'Edit project':'Create a project',`<form id="projectForm" class="modal-form"><label>Project title<input class="form-control" name="title" maxlength="180" value="${esc(project.title||'')}" required></label><label>Description<textarea class="form-control" name="description" rows="3" required>${esc(project.description||'')}</textarea></label><div class="row g-2"><div class="col"><label>Category<select class="form-select" name="category_id" required><option value="">Choose a category</option>${categoryOptions||fallbackCategory}</select></label></div><div class="col"><label>Project type<select class="form-select" name="project_type"><option value="fixed" ${project.project_type==='hourly'?'':'selected'}>Fixed price</option><option value="hourly" ${project.project_type==='hourly'?'selected':''}>Hourly</option></select></label></div></div><div class="row g-2"><div class="col"><label>Minimum budget<input class="form-control" name="budget_min" type="number" min="0" step="0.01" value="${esc(project.budget_min||'')}" required></label></div><div class="col"><label>Maximum budget<input class="form-control" name="budget_max" type="number" min="0" step="0.01" value="${esc(project.budget_max||'')}" required></label></div></div><label>Deadline<input class="form-control" name="deadline" type="date" value="${esc(project.deadline||'')}"></label><label>Required skills<select class="form-select" name="skill_ids" multiple size="4">${(skills.skills||[]).map(s=>`<option value="${s.skill_id}" ${selected.has(Number(s.skill_id))?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label><button class="btn btn-primary-soft" type="submit">${project.project_id?'Save changes':'Publish project'}</button></form>`);
     $('#projectForm').onsubmit=async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const data={title:fd.get('title'),description:fd.get('description'),category_id:Number(fd.get('category_id')),budget_min:fd.get('budget_min'),budget_max:fd.get('budget_max'),deadline:fd.get('deadline')||null,project_type:fd.get('project_type'),status:project.status||'open',skill_ids:$$('[name="skill_ids"] option:checked',$('#projectForm')).map(o=>Number(o.value))};try{if(project.project_id){delete data.status;await patch(`/projects/${project.project_id}`,data);}else await post('/projects',data);bootstrap.Modal.getInstance($('#formModal')).hide();notify('Project saved.');if(state.page==='projects')loadProjects();else renderHome();}catch(err){notify(err.message,'error');}};
   }
   async function showProject(projectId) { try{const {project:p}=await request(`/projects/${projectId}`);showDetails(p.title,`<div class="detail-stats"><div class="detail-stat"><small>Budget</small><b>${money(p.budget_min)} – ${money(p.budget_max)}</b></div><div class="detail-stat"><small>Client</small><b>${esc(p.client_name)}</b></div><div class="detail-stat"><small>Deadline</small><b>${esc(date(p.deadline))}</b></div></div><p class="detail-copy">${esc(p.description)}</p><div class="detail-section"><h4>Skills</h4><div class="skill-list">${(p.required_skills||[]).map(s=>`<span class="skill-chip">${esc(s.name)}</span>`).join('')||'No specific skills listed'}</div></div>`);}catch(e){notify(e.message,'error');} }
@@ -235,6 +240,19 @@
       const c=ct.contract, client=state.user.role==='client';
       const caseRows=(disputeData.disputes||[]).filter(d=>Number(d.contract_id)===Number(id));
       const contractPayments=(paymentData.payments||[]).filter(p=>Number(p.contract_id)===Number(id));
+      let reviewSection='';
+      if(state.user.role!=='admin'&&c.status==='completed'){
+        const revieweeId=client?c.freelancer_id:c.client_id;
+        try{
+          const reviewData=await request(`/reviews/users/${revieweeId}`);
+          const prior=(reviewData.reviews||[]).find(r=>Number(r.contract_id)===Number(id)&&Number(r.reviewer_id)===Number(state.user.user_id));
+          reviewSection=prior
+            ?`<div class="detail-section review-recorded"><h4>Your review</h4><p><strong>${Number(prior.rating)} / 5 ★</strong>${prior.comment?` · ${esc(prior.comment)}`:''}</p></div>`
+            :`<div class="detail-section"><h4>Leave a review</h4><form id="reviewForm" class="message-compose"><select name="rating" class="form-select" style="max-width:120px" aria-label="Rating"><option value="5">5 stars</option><option value="4">4 stars</option><option value="3">3 stars</option><option value="2">2 stars</option><option value="1">1 star</option></select><input name="comment" class="form-control" placeholder="Share a quick note"><button class="btn btn-outline-soft">Review</button></form></div>`;
+        }catch{
+          reviewSection='<div class="detail-section"><p class="text-secondary small">Review status could not be checked.</p></div>';
+        }
+      }
       const taskHtml=(tasks.tasks||[]).map(t=>`<div class="work-row"><div><b>${esc(t.title)}</b><small>Due ${esc(date(t.due_date))} · ${fmt(t.status)}</small></div><div>${client&&t.status==='submitted'?`<button class="btn btn-primary-soft" data-action="task-status" data-id="${t.task_id}" data-status="completed" data-contract="${id}">Complete</button>`:state.user.role==='freelancer'&&['todo','in_progress'].includes(t.status)?`<button class="btn btn-outline-soft" data-action="task-status" data-id="${t.task_id}" data-status="${t.status==='todo'?'in_progress':'submitted'}" data-contract="${id}">${t.status==='todo'?'Start':'Submit'}</button>`:''}</div></div>`).join('')||'<p class="text-secondary small">No tasks yet.</p>';
       const mileHtml=(miles.milestones||[]).map(m=>{const related=contractPayments.filter(p=>Number(p.milestone_id)===Number(m.milestone_id));const paymentState=related.some(p=>p.status==='completed')?'completed':related[0]?.status||'not recorded';return `<div class="work-row"><div><b>${esc(m.title)} · ${money(m.amount)}</b><small>Due ${esc(date(m.due_date))} · Work ${fmt(m.status)} · Payment ${fmt(paymentState)}</small></div><div>${state.user.role==='freelancer'&&['pending','rejected'].includes(m.status)?`<button class="btn btn-outline-soft" data-action="milestone-submit" data-id="${m.milestone_id}" data-contract="${id}">Submit</button>`:''}${client&&m.status==='submitted'?`<button class="btn btn-outline-soft" data-action="milestone-review" data-id="${m.milestone_id}" data-status="rejected" data-contract="${id}">Request changes</button><button class="btn btn-primary-soft" data-action="milestone-review" data-id="${m.milestone_id}" data-status="approved" data-contract="${id}">Approve</button>`:''}${client&&m.status==='approved'?`<button class="btn btn-primary-soft" data-action="pay-milestone" data-id="${m.milestone_id}" data-amount="${m.amount}" data-contract="${id}">Pay</button>`:''}</div></div>`;}).join('')||'<p class="text-secondary small">No milestones yet.</p>';
       const messages=(msgs.messages||[]).map(m=>`<div class="message-bubble ${Number(m.sender_id)===Number(state.user.user_id)?'mine':''}">${esc(m.body)}<small>${esc(m.sender_name)} · ${date(m.sent_at)} ${m.read_at?'· Read':''}</small></div>`).join('');
@@ -244,9 +262,9 @@
         <div class="detail-section"><h4>Messages</h4><div class="message-thread">${messages||'<p class="text-secondary small">Start the conversation with your project partner.</p>'}</div><form id="messageForm" class="message-compose"><input name="body" class="form-control" placeholder="Write a message…" required><button class="btn btn-primary-soft">Send</button></form></div>
         ${client&&c.status==='active'?`<div class="detail-section d-flex gap-2">${button('Record project payment','pay-contract','btn-outline-soft',`data-contract="${id}" data-amount="${c.agreed_amount}"`)}${button('Complete contract','complete-contract','btn-primary-soft',`data-contract="${id}"`)}</div>`:''}
         ${state.user.role!=='admin'&&c.status!=='cancelled'?`<div class="detail-section"><button class="btn btn-outline-soft" data-action="open-dispute" data-contract="${id}">Open a dispute</button>${caseRows.map(d=>`<div class="work-row"><div><b>Dispute #${d.dispute_id} · ${esc(d.reason)}</b><small>${fmt(d.status)} ${d.resolution?`· ${esc(d.resolution)}`:''}</small></div></div>`).join('')}</div>`:''}
-        ${state.user.role!=='admin'?`<div class="detail-section"><h4>Leave a review</h4><form id="reviewForm" class="message-compose"><select name="rating" class="form-select" style="max-width:120px"><option value="5">5 stars</option><option value="4">4 stars</option><option value="3">3 stars</option><option value="2">2 stars</option><option value="1">1 star</option></select><input name="comment" class="form-control" placeholder="Share a quick note"><button class="btn btn-outline-soft">Review</button></form></div>`:''}`);
+        ${reviewSection}`);
       if($('#messageForm'))$('#messageForm').onsubmit=async e=>{e.preventDefault();try{await post(`/contracts/${id}/messages`,{body:new FormData(e.currentTarget).get('body')});openContract(id);}catch(err){notify(err.message,'error');}};
-      if($('#reviewForm'))$('#reviewForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await post(`/contracts/${id}/reviews`,{rating:Number(f.get('rating')),comment:f.get('comment')||null});notify('Review submitted.');}catch(err){notify(err.message,'error');}};
+      if($('#reviewForm'))$('#reviewForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await post(`/contracts/${id}/reviews`,{rating:Number(f.get('rating')),comment:f.get('comment')||null});notify('Review submitted.');openContract(id);}catch(err){notify(err.message,'error');}};
     }catch(e){notify(e.message,'error');}
   }
 
@@ -261,7 +279,21 @@
     destroyCharts();pageContent.innerHTML=`${heading('Messages','Your contract conversations, all together.')}<div id="messagesArea"></div>`;
     if(state.user.role==='admin'){$('#messagesArea').innerHTML=empty('Messages are private to participants','Admins do not access contract conversation content.');return;}
     const {contracts=[]}=await safe('/contracts/mine','contracts');if(!contracts.length){$('#messagesArea').innerHTML=empty('No conversations yet','Messages are available inside an active contract workspace.');return;}
-    $('#messagesArea').innerHTML=`<div class="contract-grid">${contracts.map(c=>`<article class="contract-card"><div class="contract-card-head"><div><h3>${esc(c.project_title)}</h3><p>Contract #${c.contract_id}</p></div>${fmt(c.status)}</div><div class="card-actions"><button class="btn btn-primary-soft" data-action="contract-detail" data-id="${c.contract_id}">Open conversation</button></div></article>`).join('')}</div>`;
+    const ordered=contracts.slice().sort((a,b)=>(a.status==='active'?-1:0)-(b.status==='active'?-1:0));
+    $('#messagesArea').innerHTML=`<section class="messages-layout"><aside class="conversation-panel"><div class="conversation-panel-head"><h2>Conversations</h2><input id="conversationSearch" class="form-control" type="search" placeholder="Search conversations…" aria-label="Search conversations"></div><div id="conversationList" class="conversation-list">${ordered.map((c,i)=>`<button class="conversation-item ${i===0?'active':''}" type="button" data-message-contract="${c.contract_id}" data-title="${esc(c.project_title)}"><span class="conversation-avatar">${esc(initials(c.project_title))}</span><span class="conversation-copy"><b>${esc(c.project_title)}</b><small>Contract #${c.contract_id}</small></span><span class="conversation-status">${fmt(c.status)}</span></button>`).join('')}</div></aside><section class="conversation-view" id="conversationView" aria-live="polite">${loadingState('Loading conversation…')}</section></section>`;
+    const list=$('#conversationList');
+    $('#conversationSearch').addEventListener('input',e=>{const q=e.currentTarget.value.trim().toLowerCase();$$('.conversation-item',list).forEach(item=>{item.hidden=!item.textContent.toLowerCase().includes(q);});});
+    list.addEventListener('click',e=>{const item=e.target.closest('[data-message-contract]');if(!item)return;$$('.conversation-item',list).forEach(row=>row.classList.toggle('active',row===item));loadMessageConversation(item.dataset.messageContract,item.dataset.title);});
+    loadMessageConversation(ordered[0].contract_id,ordered[0].project_title);
+  }
+  async function loadMessageConversation(id,title) {
+    const view=$('#conversationView');if(!view)return;view.innerHTML=loadingState('Loading messages…');
+    try{
+      const [contractData,messageData]=await Promise.all([request(`/contracts/${id}`),request(`/contracts/${id}/messages`)]);
+      const contract=contractData.contract,messages=messageData.messages||[];
+      view.innerHTML=`<header class="conversation-header"><div class="conversation-avatar">${esc(initials(title))}</div><div><h2>${esc(title)}</h2><p>Contract #${esc(id)} · ${fmt(contract.status)}</p></div><button class="btn btn-outline-soft" data-action="contract-detail" data-id="${esc(id)}">Open workspace</button></header><div class="conversation-thread">${messages.length?messages.map(m=>`<div class="message-bubble ${Number(m.sender_id)===Number(state.user.user_id)?'mine':''}">${esc(m.body)}<small>${esc(m.sender_name)} · ${date(m.sent_at)}${m.read_at?' · Read':''}</small></div>`).join(''):'<div class="conversation-empty">No messages yet. Start the conversation with your project partner.</div>'}</div><form id="conversationCompose" class="conversation-compose"><input name="body" class="form-control" placeholder="Write a message…" aria-label="Write a message" required><button class="btn btn-primary-soft">Send</button></form>`;
+      $('#conversationCompose').onsubmit=async e=>{e.preventDefault();const body=new FormData(e.currentTarget).get('body')?.toString().trim();if(!body)return;const submit=e.currentTarget.querySelector('button[type="submit"]')||e.currentTarget.querySelector('button');submit.disabled=true;try{await post(`/contracts/${id}/messages`,{body});await loadMessageConversation(id,title);}catch(err){notify(err.message,'error');submit.disabled=false;}};
+    }catch(e){view.innerHTML=empty('Messages could not load',esc(e.message),`<button class="btn btn-outline-soft" data-action="message-retry" data-id="${esc(id)}" data-title="${esc(title)}">Try again</button>`);}
   }
   async function renderProfile() {
     destroyCharts();pageContent.innerHTML=`${heading('My profile','Keep your account details current and your profile complete.')}<div id="profileArea">${loadingState('Loading your profile…')}</div>`;
@@ -335,15 +367,15 @@
   $$('.auth-tab').forEach(t=>t.addEventListener('click',()=>authTab(t.dataset.authTab)));
   $('#forgotPasswordLink').addEventListener('click',e=>{e.preventDefault();showForgotPassword();});
   $('#forgotPasswordForm').addEventListener('submit',e=>{e.preventDefault();requestPasswordReset(e.currentTarget);});
-  $('#resetPasswordForm').addEventListener('submit',e=>{e.preventDefault();setNewPassword(e.currentTarget);});
   $$('[data-auth-mode="login"]').forEach(button=>button.addEventListener('click',()=>authTab('login')));
+  showApp();
   $('#sideNav').addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(b)navigate(b.dataset.page);});
   document.addEventListener('click',async e=>{
     const nav=e.target.closest('[data-page]');if(nav){navigate(nav.dataset.page==='projects'?'projects':nav.dataset.page);return;}
     const b=e.target.closest('[data-action]');if(!b)return;const id=b.dataset.id,action=b.dataset.action;
     try {
       if(action==='create-project')return showProjectForm();if(action==='edit-project'){const p=await request(`/projects/${id}`);return showProjectForm(p.project);}
-      if(action==='page-projects')return navigate('projects');if(action==='reload-notifications')return renderNotifications();
+      if(action==='page-projects')return navigate('projects');if(action==='reload-notifications')return renderNotifications();if(action==='message-retry')return loadMessageConversation(id,b.dataset.title);
       if(action==='search-projects')return loadProjects();if(action==='apply')return showApply(id,b.dataset.title);if(action==='view-project')return showProject(id);
       if(action==='project-apps')return showProjectApplications(id);
       if(action==='cancel-project'){if(!confirm('Cancel this project? This action cannot be undone from the dashboard.'))return;await del(`/projects/${id}`);notify('Project cancelled.');return state.page==='projects'?loadProjects():renderHome();}
@@ -362,13 +394,11 @@
       if(action==='advance-payment'){const status=b.dataset.status;let next=status==='pending'?'processing':status==='processing'?'completed':'refunded';const reference=next==='completed'?prompt('Transaction reference'):undefined;if(next==='completed'&&!reference)return;await patch(`/payments/${id}/status`,{status:next,...(reference?{transaction_reference:reference}:{})});notify(`Payment ${next}.`);return renderAdmin();}
     }catch(err){notify(err.message,'error');}
   });
-  $('#adminUsers').addEventListener('change',async e=>{const el=e.target.closest('[data-user-status]');if(!el)return;try{await patch(`/users/${el.dataset.userStatus}/status`,{account_status:el.value});notify('Account status updated.');}catch(err){notify(err.message,'error');}});
+  pageContent.addEventListener('change',async e=>{const el=e.target.closest('[data-user-status]');if(!el)return;try{await patch(`/users/${el.dataset.userStatus}/status`,{account_status:el.value});notify('Account status updated.');}catch(err){notify(err.message,'error');}});
   $('#notificationBtn').addEventListener('click',async()=>{$('#notificationPanel').classList.toggle('d-none');const open=!$('#notificationPanel').classList.contains('d-none');$('#notificationBtn').setAttribute('aria-expanded',String(open));if(open)renderNotifications();});
   $('#notificationList').addEventListener('click',async e=>{const item=e.target.closest('[data-id]');if(!item)return;try{await patch(`/notifications/${item.dataset.id}/read`,{});renderNotifications();}catch(err){notify(err.message,'error');}});
   $('#notificationList').addEventListener('keydown',e=>{const item=e.target.closest('[role="button"][data-id]');if(item&&(e.key==='Enter'||e.key===' ')){e.preventDefault();item.click();}});
   $('#readAllBtn').addEventListener('click',async()=>{try{await patch('/notifications/read-all',{});renderNotifications();}catch(err){notify(err.message,'error');}});
-  $('#logoutBtn').addEventListener('click',()=>signOut(true));$('#mobileMenu').addEventListener('click',()=>$('#sidebar').classList.toggle('open'));
+  $('#mobileMenu').addEventListener('click',()=>$('#sidebar').classList.toggle('open'));
   document.addEventListener('click',e=>{if(!e.target.closest('#notificationPanel')&&!e.target.closest('#notificationBtn'))$('#notificationPanel').classList.add('d-none');});
-  const resetToken=new URLSearchParams(location.hash.slice(1)).get('reset_token')||new URLSearchParams(location.search).get('reset_token');
-  if(resetToken) { if(state.token)signOut(false); showResetPassword(resetToken); } else showApp();
 })();

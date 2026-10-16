@@ -1,4 +1,3 @@
-CREATE DATABASE IF NOT EXISTS freelancer_pms;
 -- Freelancer Project Management System
 -- Target: MySQL 8.0.16+ (CHECK constraints are enforced from 8.0.16).
 CREATE DATABASE IF NOT EXISTS freelancer_pms
@@ -26,20 +25,6 @@ CREATE TABLE IF NOT EXISTS Revoked_Token (
   revoked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (token_jti),
   KEY ix_revoked_token_expiry (expires_at)
-) ENGINE=InnoDB;
-
--- Reset tokens are random values emailed to the user; only their SHA-256 digests are stored.
-CREATE TABLE IF NOT EXISTS Password_Reset_Token (
-  reset_token_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id BIGINT UNSIGNED NOT NULL,
-  token_hash CHAR(64) NOT NULL,
-  expires_at DATETIME NOT NULL,
-  used_at DATETIME NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (reset_token_id),
-  UNIQUE KEY uq_password_reset_token_hash (token_hash),
-  KEY ix_password_reset_user_expiry (user_id, expires_at),
-  CONSTRAINT fk_password_reset_user FOREIGN KEY (user_id) REFERENCES `User` (user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS Client (
@@ -235,6 +220,8 @@ CREATE TABLE IF NOT EXISTS Payment (
   CONSTRAINT chk_payment_amount CHECK (amount > 0),
   CONSTRAINT chk_payment_status CHECK (status IN ('pending','processing','completed','failed','refunded')),
   CONSTRAINT chk_payment_distinct_parties CHECK (payer_id <> payee_id),
+  CONSTRAINT chk_completed_payment_reference CHECK
+    (status <> 'completed' OR (transaction_reference IS NOT NULL AND CHAR_LENGTH(TRIM(transaction_reference)) > 0)),
   CONSTRAINT fk_payment_contract FOREIGN KEY (contract_id) REFERENCES Contract (contract_id) ON DELETE RESTRICT,
   CONSTRAINT fk_payment_contract_milestone FOREIGN KEY (contract_id, milestone_id)
     REFERENCES Milestone (contract_id, milestone_id) ON DELETE RESTRICT,

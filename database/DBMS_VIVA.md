@@ -28,7 +28,7 @@
    Accepting an application changes application/project state and creates a contract atomically. Payment and milestone lifecycle changes also use transaction boundaries so partial updates can roll back.
 
 10. **What do the triggers enforce?**  
-    They check cross-table conditions for contract creation from accepted applications and ensure assigned tasks belong to the hired freelancer.
+    They check cross-table conditions for contract creation from accepted applications, task assignment to the hired freelancer, payment party/contract consistency, and valid payment status changes.
 
 11. **What information do the views summarize?**  
     Views expose payment totals, freelancer earnings, client spending, and user ratings for dashboards and reports.

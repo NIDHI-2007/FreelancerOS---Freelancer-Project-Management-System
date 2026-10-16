@@ -14,15 +14,15 @@
 - Required fields use `NOT NULL`; status, role, numeric range, rating, proficiency, and party-separation rules use `CHECK`; lifecycle fields use defaults for status and timestamps.
 - `CASCADE` is used for dependent profiles and bridge rows; financial and historical relationships use `RESTRICT` so ledger/history is not silently deleted.
 - 1:1: `User` to `Client` or `Freelancer` through profile PK/FKs. 1:M: client/project, project/application, contract/task/milestone/payment/message, and user/notification. M:N: freelancer/skill and project/skill through bridge tables.
-- `Password_Reset_Token` is a user-owned 1:M credential lifecycle table; it stores a SHA-256 digest, expiry, and use timestamp, never the emailed bearer token itself.
+- Password reset is a loopback-only demo operation that updates the Werkzeug hash directly; it uses no token table, reset link, OTP, or email.
 
 ## Queries, objects, and indexing
 
 - Route SQL demonstrates joins in project/application/contract/payment/review lookups, grouped aggregates in reporting views and admin reports, `HAVING` and `EXISTS` for all-required-skill matching, and parameterized subqueries for search.
-- Reporting views summarize contract payments, freelancer earnings, client spending, and user ratings. Functions calculate average rating and contract balance. Procedures demonstrate transactional hiring and milestone settlement. Triggers enforce accepted-application contract creation conditions and hired-freelancer task assignment.
+- Reporting views summarize contract payments, freelancer earnings, client spending, and user ratings. Functions calculate average rating and contract balance. Procedures demonstrate transactional hiring and milestone settlement. Triggers enforce accepted-application contract creation, hired-freelancer task assignment, contract payment-party matching, and valid payment status transitions.
 - Existing indexes cover ownership/status/date access paths, bridge-table reverse lookup, unread notifications/messages, disputes, and transaction references. Added `ix_payment_milestone_status` for frequent milestone payment reservation and settlement lookups. See `phase11_indexes.sql` to apply it once to an existing database.
 - `viva_queries.sql` contains read-focused examples for joins, aggregation, `HAVING`, subqueries, views, functions, transaction locking/rollback, triggers, and indexes. Mutating stored procedure examples are commented out.
 
 ## Verification limits
 
-The API integration suite executes route SQL and reporting views against the SQLite test double. MySQL credentials/server are not configured in the current environment, so MySQL-only DDL, triggers, procedures/functions, foreign-key behavior, and `EXPLAIN` plans still need to be run on MySQL 8.0.16+ after applying `schema.sql`, `triggers.sql`, `views.sql`, and `routines.sql`.
+The API integration suite executes route SQL and reporting views against the SQLite test double. No MySQL client is installed in the current environment, so MySQL-only DDL, triggers, procedures/functions, foreign-key behavior, and `EXPLAIN` plans still need to be run on MySQL 8.0.16+ after applying `schema.sql`, `seed.sql`, `triggers.sql`, `views.sql`, and `routines.sql`.

@@ -7,7 +7,7 @@
   <title>FreelanceOS — Project workspace</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="styles.css" rel="stylesheet">
 </head>
@@ -22,7 +22,6 @@
         <div class="auth-proof"><div class="avatar-stack"><i>J</i><i>A</i><i>M</i></div><span>Built for people who do the work.</span></div>
       </div>
       <div class="auth-orbit orbit-one"></div><div class="auth-orbit orbit-two"></div>
-      <div class="auth-footer">FREELANCE PROJECT MANAGEMENT SYSTEM · DBMS PROJECT</div>
     </section>
     <section class="auth-main">
       <div class="auth-mobile-brand"><a class="brand" href="#"><span class="brand-mark">f</span> freelance<span>OS</span></a></div>
@@ -44,11 +43,6 @@
         </form>
         <form id="forgotPasswordForm" class="auth-form d-none">
           <label>Email address<input class="form-control" type="email" name="email" autocomplete="email" placeholder="you@example.com" required></label>
-          <button class="btn btn-ink w-100" type="submit">Send reset link <span>→</span></button>
-          <button class="btn btn-link btn-sm text-decoration-none" type="button" data-auth-mode="login">Back to sign in</button>
-        </form>
-        <form id="resetPasswordForm" class="auth-form d-none">
-          <input type="hidden" name="token">
           <label>New password<input class="form-control" type="password" name="password" minlength="8" autocomplete="new-password" placeholder="At least 8 characters" required></label>
           <label>Confirm new password<input class="form-control" type="password" name="confirm_password" minlength="8" autocomplete="new-password" placeholder="Re-enter your password" required></label>
           <button class="btn btn-ink w-100" type="submit">Reset password <span>→</span></button>
@@ -56,7 +50,6 @@
         </form>
         <div class="auth-note"><span class="note-dot"></span> Secure sign-in powered by JWT</div>
       </div>
-      <div class="api-config"><label for="apiBase">API endpoint</label><input id="apiBase" class="form-control" value="http://127.0.0.1:5000/api"><small>Change this if Flask runs on another address.</small></div>
       <div id="authAlert" class="alert d-none" role="alert"></div>
     </section>
   </div>
@@ -81,7 +74,7 @@
       <div class="sidebar-bottom"><div class="help-card"><div class="help-symbol">✳</div><b>Make it a good one.</b><p>Your next great collaboration starts here.</p></div><div class="side-user"><div class="user-avatar" id="sideAvatar">U</div><div class="user-meta"><b id="sideName">User</b><small id="sideEmail">user@example.com</small></div><button id="logoutBtn" class="logout-btn" title="Sign out">↗</button></div></div>
     </aside>
     <main class="main-area">
-      <header class="topbar"><button id="mobileMenu" class="mobile-menu" aria-label="Open menu">☰</button><div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="pageCrumb">Overview</strong></div><div class="top-actions"><button id="notificationBtn" class="icon-button" title="Notifications">♧<i id="notificationDot" class="notification-dot d-none"></i></button><div class="top-divider"></div><div class="top-user"><span id="topName">User</span><div id="topAvatar" class="user-avatar small-avatar">U</div></div></div></header>
+      <header class="topbar"><button id="mobileMenu" class="mobile-menu" aria-label="Open menu">☰</button><div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="pageCrumb">Overview</strong></div><div class="top-actions"><button id="notificationBtn" class="icon-button" title="Notifications">♧<i id="notificationDot" class="notification-dot d-none"></i></button><div class="top-divider"></div><div class="top-user"><span id="topName">User</span><div id="topAvatar" class="user-avatar small-avatar">U</div></div><button id="dashboardLogoutBtn" type="button" class="btn btn-outline-soft dashboard-logout">Sign out</button></div></header>
       <div id="toast" class="toast-message d-none"></div>
       <section id="pageContent" class="page-content"></section>
     </main>
@@ -93,6 +86,6 @@
   <div id="globalAlert" class="global-alert d-none" role="alert"></div>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=basic-reset-1"></script>
 </body>
 </html>

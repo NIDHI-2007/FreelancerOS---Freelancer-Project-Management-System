@@ -4,7 +4,7 @@ A college DBMS project for managing freelance projects from discovery and biddin
 
 ## Features
 
-- Client and freelancer registration, JWT login/logout, role checks, password reset by short-lived email token, profiles, skills, and portfolio.
+- Client and freelancer registration, JWT login/logout, role checks, local demo password reset, profiles, skills, and portfolio.
 - Project creation, search/filter/sort, required skills, freelancer applications/bids, and client shortlist/accept/reject.
 - Contracts, tasks, milestones, payment ledger, reviews, messaging, notifications, and disputes.
 - Role dashboards and admin controls/reports for users, payments, projects, and disputes.
@@ -28,7 +28,7 @@ Requirements: Python 3.10+, MySQL 8.0.16+ (CHECK constraints are enforced), and 
    mysql -u root -p --execute="source database/routines.sql"
    ```
 
-   `seed.sql` is a one-time sample-data load, not an idempotent migration. Omit it if you want an empty database. For an existing install, rerun `schema.sql` or apply `database/migrations/001_password_reset_tokens.sql`; both create the reset-token table idempotently. Do not rerun `seed.sql` on populated data. `phase11_indexes.sql` is only for an existing database that predates the index now included in `schema.sql`.
+   `seed.sql` is a one-time sample-data load, not an idempotent migration. Omit it if you want an empty database. Do not rerun it on populated data. On an existing database from the earlier reset-token implementation, apply `database/migrations/001_remove_unused_password_reset_tokens.sql` once to remove its unused token table and add the completed-payment check. Re-run `database/triggers.sql` to install the current payment rules. `phase11_indexes.sql` is only for an existing database that predates the index now included in `schema.sql`.
 
 2. Create a Python environment and install dependencies:
 
@@ -40,7 +40,7 @@ Requirements: Python 3.10+, MySQL 8.0.16+ (CHECK constraints are enforced), and 
    cd ..
    ```
 
-3. Copy `.env.example` to `.env` in the repository root. Set the MySQL account/database values and SMTP host, port, sender address, and provider credentials. Use a provider app password/token instead of an account password where available. Generate distinct application secrets:
+3. Copy `.env.example` to `.env` in the repository root. Set the MySQL account/database values. No SMTP configuration is used. Generate distinct application secrets:
 
    ```powershell
    py -c "import secrets; print(secrets.token_hex(32))"
@@ -63,7 +63,7 @@ Requirements: Python 3.10+, MySQL 8.0.16+ (CHECK constraints are enforced), and 
    python -m unittest discover -s tests -v
    ```
 
-The suite uses a SQLite test double for API behavior and reporting views; it does not replace a live MySQL install check. Public registration creates client/freelancer accounts. The sample rows in `seed.sql` use deliberately unusable placeholder password hashes; replace them with Werkzeug-generated hashes before attempting to log in as a seeded account. Generate a hash with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('choose-a-password'))"`, then insert an administrator `User` row using that hash and role `admin`; never store a plaintext password. Reset links require working SMTP settings and expire after `PASSWORD_RESET_TOKEN_MINUTES` (15 by default); only token digests are stored in `Password_Reset_Token`. For local testing without SMTP, clear `SMTP_HOST` and `SMTP_FROM`, set `PASSWORD_RESET_DEV_MODE=true`, and submit from `127.0.0.1`; the one-time URL is printed only to the Flask server console. Never enable this fallback on a public deployment.
+The suite uses a SQLite test double for API behavior and reporting views; it does not replace a live MySQL install check. Public registration creates client/freelancer accounts. The sample rows in `seed.sql` use deliberately unusable placeholder password hashes; replace them with Werkzeug-generated hashes before attempting to log in as a seeded account. Generate a hash with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('choose-a-password'))"`, then insert an administrator `User` row using that hash and role `admin`; never store a plaintext password. The simple demo password reset accepts an email and a new password without proving email ownership. It is loopback-only and must have `PASSWORD_RESET_DEV_MODE=true`; keep the flag false outside local development.
 
 ## Project layout
 
@@ -84,7 +84,7 @@ The schema is defined in [`database/schema.sql`](database/schema.sql). Main enti
 - **M:N:** freelancers to skills and projects to required skills, through composite-key junction tables.
 - FKs, unique keys, checks, defaults, and indexes enforce ownership, allowed states, valid amounts/ratings, uniqueness, and common lookup paths.
 
-The entity and junction core is normalized to 3NF. A documented caveat is that some event/ledger fields (`Task.assigned_to`, payment parties, and message receiver) repeat facts derivable from a contract. Password reset credentials are represented by a separate `Password_Reset_Token` table that stores only a SHA-256 digest, expiry, and use timestamp. See [`database/DBMS_REVIEW.md`](database/DBMS_REVIEW.md) for the detailed normalization and integrity review, and [`database/viva_queries.sql`](database/viva_queries.sql) for safe demonstration queries.
+The entity and junction core is normalized to 3NF. A documented caveat is that some event/ledger fields (`Task.assigned_to`, payment parties, and message receiver) repeat facts derivable from a contract. Password reset does not use tokens, token tables, links, or email. See [`database/DBMS_REVIEW.md`](database/DBMS_REVIEW.md) for the detailed normalization and integrity review, and [`database/viva_queries.sql`](database/viva_queries.sql) for safe demonstration queries.
 
 ## API guide
 
@@ -92,7 +92,7 @@ All routes are under `/api`. Protected requests use `Authorization: Bearer <acce
 
 | Area | Main routes | Access |
 |---|---|---|
-| Health/auth | `GET /health`, `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `GET /auth/me` | Forgot returns the same response whether or not an active account matches; reset requires an unexpired one-time token |
+| Health/auth | `GET /health`, `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/forgot-password`, `GET /auth/me` | Forgot-password demo reset is local-only and requires the development flag |
 | Users/profiles/skills | `/users/me`, `/clients/me`, `/freelancers/me`, `/freelancers/me/portfolio`, `/skills`, `/skills/me` | Self/role; user and skill administration is admin-only |
 | Projects/applications | `GET/POST /projects`, `/projects/<id>`, `/projects/<id>/applications`, `/applications/mine`, `/applications/<id>/status` | Public browse; client owns projects and decisions; freelancer bids |
 | Hiring/execution | `/contracts/mine`, `/contracts/<id>`, `/contracts/<id>/tasks`, `/tasks/<id>`, `/contracts/<id>/milestones`, `/milestones/<id>/submit`, `/milestones/<id>/review` | Contract participants; client/freelancer actions are role-checked |
@@ -102,9 +102,9 @@ All routes are under `/api`. Protected requests use `Authorization: Bearer <acce
 
 Request/response validation and required fields are defined in the route modules under [`backend/app/routes`](backend/app/routes). The DBMS objects are in `database/triggers.sql`, `views.sql`, and `routines.sql`; DBMS objects are not HTTP APIs.
 
-The project creation form currently accepts a category ID because the API does not expose a category catalog endpoint. Payment status actions only update the demo ledger; no money is transferred.
+`GET /api/categories` returns the database-backed category catalog used by project forms and search filters. Payment status actions only update the demo ledger; no money is transferred.
 
-Password reset requests use `POST /api/auth/forgot-password` with `{"email":"you@example.com"}`. The API responds with the same generic message whether or not an active account matches. The email link opens the reset form; it submits `POST /api/auth/reset-password` with `{"token":"...","password":"at-least-8-characters"}`. Reset links expire after the configured interval and work once.
+The basic local demo reset uses `POST /api/auth/forgot-password` with `{"email":"you@example.com","new_password":"at-least-8-characters"}`. The login-page form also asks for password confirmation. No email, SMTP, OTP, reset link, or token is used. The endpoint returns a generic error for unknown or inactive accounts, hashes the password with Werkzeug, and only updates active accounts when `PASSWORD_RESET_DEV_MODE=true` and the request is from loopback. This demo flow does not verify email ownership and must not be enabled on a public deployment.
 
 ## DBMS concepts demonstrated
 
