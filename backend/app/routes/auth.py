@@ -1,9 +1,7 @@
 """JWT authentication and account registration endpoints."""
 
-import hashlib
-import secrets
-from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from datetime import datetime, timezone
+import re
 
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import create_access_token, get_jwt, get_jwt_identity, jwt_required
@@ -11,8 +9,6 @@ from mysql.connector import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.db import get_db
-from app.utils.email import send_password_reset_email, smtp_is_configured
-
 auth_bp = Blueprint("auth", __name__)
 SELF_REGISTERABLE_ROLES = {"client", "freelancer"}
 
@@ -108,133 +104,55 @@ def forgot_password():
     if not isinstance(body, dict):
         return _bad_request("A JSON object is required.")
     email = body.get("email")
-    if not isinstance(email, str) or not email.strip() or len(email.strip()) > 254 or "@" not in email:
+    # Accept the former `password` field for compatibility while preferring
+    # the explicit request name used by the current UI.
+    password = body.get("new_password", body.get("password"))
+    if (
+        not isinstance(email, str)
+        or len(email.strip()) > 254
+        or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email.strip())
+    ):
         return _bad_request("Provide a valid email address.")
+    if not isinstance(password, str) or len(password) < 8:
+        return _bad_request("new_password must contain at least 8 characters.")
+    if not current_app.config.get("PASSWORD_RESET_DEV_MODE") or request.remote_addr not in {"127.0.0.1", "::1"}:
+        return jsonify(error={"code": "password_reset_unavailable", "message": "Password recovery is available only in local development."}), 403
 
-    response = jsonify(message="If an account matches that email, reset instructions will be sent.")
     connection = get_db()
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor()
     try:
         cursor.execute(
-            "SELECT user_id, email FROM `User` WHERE email = %s AND account_status = 'active'",
-            (email.strip().lower(),),
+            "UPDATE `User` SET password_hash = %s "
+            "WHERE email = %s AND account_status = 'active'",
+            (generate_password_hash(password), email.strip().lower()),
         )
-        user = cursor.fetchone()
-        if user:
-            token = secrets.token_urlsafe(32)
-            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-            expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
-                minutes=current_app.config["PASSWORD_RESET_TOKEN_MINUTES"]
-            )
-            cursor.execute(
-                "UPDATE Password_Reset_Token SET used_at = UTC_TIMESTAMP() "
-                "WHERE user_id = %s AND used_at IS NULL",
-                (user["user_id"],),
-            )
-            cursor.execute(
-                "DELETE FROM Password_Reset_Token WHERE expires_at <= UTC_TIMESTAMP()",
-            )
-            cursor.execute(
-                "INSERT INTO Password_Reset_Token (user_id, token_hash, expires_at) VALUES (%s, %s, %s)",
-                (user["user_id"], token_hash, expires_at),
-            )
-            connection.commit()
-            # Put the credential in the URL fragment so it is not sent in the
-            # initial HTTP request or written to normal access logs.
-            reset_url = (
-                f"{current_app.config['APP_BASE_URL']}/#"
-                f"{urlencode({'reset_token': token})}"
-            )
-            local_request = request.remote_addr in {"127.0.0.1", "::1"}
-            dev_mail_fallback = (
-                current_app.config.get("PASSWORD_RESET_DEV_MODE")
-                and local_request
-                and not smtp_is_configured()
-            )
-            if dev_mail_fallback:
-                current_app.logger.warning(
-                    "DEV ONLY: password reset link for local testing: %s", reset_url
-                )
-            else:
-                try:
-                    send_password_reset_email(user["email"], reset_url)
-                except Exception as error:
-                    current_app.logger.error(
-                        "Password reset email delivery failed (%s).", type(error).__name__
-                    )
-                    cursor.execute(
-                        "UPDATE Password_Reset_Token SET used_at = UTC_TIMESTAMP() "
-                        "WHERE token_hash = %s AND used_at IS NULL",
-                        (token_hash,),
-                    )
-                    connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        cursor.close()
-    response.status_code = 202
-    return response
-
-
-@auth_bp.post("/reset-password")
-def reset_password():
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        return _bad_request("A JSON object is required.")
-    token, password = body.get("token"), body.get("password")
-    if not isinstance(token, str) or not token or not isinstance(password, str):
-        return _bad_request("token and password are required.")
-    if len(password) < 8:
-        return _bad_request("password must contain at least 8 characters.")
-
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    connection = get_db()
-    cursor = connection.cursor(dictionary=True)
-    try:
-        cursor.execute(
-            "SELECT reset_token_id, user_id FROM Password_Reset_Token "
-            "WHERE token_hash = %s AND used_at IS NULL AND expires_at > UTC_TIMESTAMP() FOR UPDATE",
-            (token_hash,),
-        )
-        reset_record = cursor.fetchone()
-        if not reset_record:
-            connection.rollback()
-            return jsonify(error={"code": "invalid_reset_token", "message": "The reset link is invalid or expired."}), 400
-
-        cursor.execute(
-            "UPDATE `User` SET password_hash = %s WHERE user_id = %s AND account_status = 'active'",
-            (generate_password_hash(password), reset_record["user_id"]),
-        )
-        if cursor.rowcount != 1:
-            connection.rollback()
-            return jsonify(error={"code": "invalid_reset_token", "message": "The reset link is invalid or expired."}), 400
-        cursor.execute(
-            "UPDATE Password_Reset_Token SET used_at = UTC_TIMESTAMP() "
-            "WHERE user_id = %s AND used_at IS NULL",
-            (reset_record["user_id"],),
-        )
+        updated = cursor.rowcount
         connection.commit()
     except Exception:
         connection.rollback()
         raise
     finally:
         cursor.close()
-    return jsonify(message="Password reset. You can now sign in with your new password."), 200
+    if not updated:
+        return jsonify(error={"code": "password_reset_failed", "message": "Unable to reset the password. Check the email and try again."}), 400
+    return jsonify(message="Password reset successfully. Please log in."), 200
 
 
 @auth_bp.post("/logout")
-@jwt_required()
+@jwt_required(skip_revocation_check=True)
 def logout():
     claims = get_jwt()
     connection = get_db()
     cursor = connection.cursor()
     try:
         cursor.execute("DELETE FROM Revoked_Token WHERE expires_at <= UTC_TIMESTAMP()")
-        cursor.execute(
-            "INSERT INTO Revoked_Token (token_jti, expires_at) VALUES (%s, %s)",
-            (claims["jti"], datetime.fromtimestamp(claims["exp"], timezone.utc).replace(tzinfo=None)),
-        )
+        # Make logout safe to retry if the response is lost after the DB commit.
+        cursor.execute("SELECT 1 FROM Revoked_Token WHERE token_jti = %s", (claims["jti"],))
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "INSERT INTO Revoked_Token (token_jti, expires_at) VALUES (%s, %s)",
+                (claims["jti"], datetime.fromtimestamp(claims["exp"], timezone.utc).replace(tzinfo=None)),
+            )
         connection.commit()
     except Exception:
         connection.rollback()

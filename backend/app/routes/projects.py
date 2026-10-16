@@ -38,6 +38,18 @@ class InvalidProjectReference(ValueError):
     """A category or skill identifier does not exist in the catalog."""
 
 
+@projects_bp.get("/categories")
+def list_categories():
+    """Return the database-backed category catalog for project forms/filters."""
+    cursor = get_db().cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT category_id, name, description FROM Category ORDER BY name")
+        categories = cursor.fetchall()
+    finally:
+        cursor.close()
+    return jsonify(categories=categories), 200
+
+
 @projects_bp.get("/projects")
 def search_projects():
     filters, error = _search_filters()
