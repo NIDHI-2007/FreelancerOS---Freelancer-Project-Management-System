@@ -150,7 +150,21 @@ def create_dispute(contract_id):
         )
         dispute_id = cursor.lastrowid
         other_party = contract["freelancer_id"] if user_id == contract["client_id"] else contract["client_id"]
-        add_notification(cursor, other_party, f"A dispute was opened for contract #{contract_id}.", "dispute_opened")
+        add_notification(
+            cursor, other_party,
+            f"Dispute #{dispute_id} was opened for contract #{contract_id}.",
+            "dispute_opened",
+        )
+        cursor.execute(
+            "SELECT user_id FROM `User` WHERE role = 'admin' AND account_status = 'active' "
+            "ORDER BY user_id LIMIT 1"
+        )
+        primary_admin = cursor.fetchone()
+        if primary_admin:
+            add_notification(
+                cursor, primary_admin["user_id"],
+                f"Dispute #{dispute_id} requires review.", "dispute_opened",
+            )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -200,8 +214,14 @@ def update_dispute(dispute_id):
             "WHERE dispute_id = %s",
             (status, int(get_jwt_identity()), resolution.strip() if resolution else None, status, dispute_id),
         )
+        notice_type = "dispute_resolved" if status == "resolved" else "dispute_status"
+        message = (
+            f"Dispute #{dispute_id} was resolved by an administrator."
+            if status == "resolved"
+            else f"Dispute #{dispute_id} is now {status}."
+        )
         for participant_id in {dispute["client_id"], dispute["freelancer_id"]}:
-            add_notification(cursor, participant_id, f"Dispute #{dispute_id} is now {status}.", "dispute_status")
+            add_notification(cursor, participant_id, message, notice_type)
         connection.commit()
     except Exception:
         connection.rollback()

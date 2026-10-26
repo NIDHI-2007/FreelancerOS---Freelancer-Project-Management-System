@@ -28,7 +28,7 @@ Requirements: Python 3.10+, MySQL 8.0.16+ (CHECK constraints are enforced), and 
    mysql -u root -p --execute="source database/routines.sql"
    ```
 
-   `seed.sql` is a one-time sample-data load, not an idempotent migration. Omit it if you want an empty database. Do not rerun it on populated data. On an existing database from the earlier reset-token implementation, apply `database/migrations/001_remove_unused_password_reset_tokens.sql` once to remove its unused token table and add the completed-payment check. Re-run `database/triggers.sql` to install the current payment rules. `phase11_indexes.sql` is only for an existing database that predates the index now included in `schema.sql`.
+   `seed.sql` is a rerunnable local/demo data load. It replaces the named demo workflows and refreshes the documented demo accounts; use it only in a college/demo database, not a production database. Omit it if you want an empty database. On an existing database from the earlier reset-token implementation, apply `database/migrations/001_remove_unused_password_reset_tokens.sql` once to remove its unused token table and add the completed-payment check. Re-run `database/triggers.sql` to install the current payment rules. `phase11_indexes.sql` is only for an existing database that predates the index now included in `schema.sql`.
 
 2. Create a Python environment and install dependencies:
 
@@ -63,7 +63,7 @@ Requirements: Python 3.10+, MySQL 8.0.16+ (CHECK constraints are enforced), and 
    python -m unittest discover -s tests -v
    ```
 
-The suite uses a SQLite test double for API behavior and reporting views; it does not replace a live MySQL install check. Public registration creates client/freelancer accounts. The sample rows in `seed.sql` use deliberately unusable placeholder password hashes; replace them with Werkzeug-generated hashes before attempting to log in as a seeded account. Generate a hash with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('choose-a-password'))"`, then insert an administrator `User` row using that hash and role `admin`; never store a plaintext password. The simple demo password reset accepts an email and a new password without proving email ownership. It is loopback-only and must have `PASSWORD_RESET_DEV_MODE=true`; keep the flag false outside local development.
+The suite uses a SQLite test double for API behavior and reporting views; it does not replace a live MySQL install check. The seed provides six local demo accounts: `client@example.test`, `client2@example.test`, `freelancer@example.test`, `freelancer2@example.test`, `freelancer3@example.test`, and `admin@example.test`. Their shared demo password is `Demo@123`; the database stores Werkzeug hashes, not plaintext passwords. Do not reuse these credentials outside a local demonstration. Public registration creates client/freelancer accounts; create a separate administrator account directly in MySQL if needed. The simple demo password reset accepts an email and a new password without proving email ownership. It is loopback-only and must have `PASSWORD_RESET_DEV_MODE=true`; keep the flag false outside local development.
 
 ## Project layout
 

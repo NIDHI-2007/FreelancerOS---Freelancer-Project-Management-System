@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from app import create_app  # noqa: E402
 from flask_jwt_extended import create_access_token  # noqa: E402
 from werkzeug.security import generate_password_hash  # noqa: E402
+from app.utils.notifications import add_notification  # noqa: E402
 
 
 class TestCursor:
@@ -156,6 +157,8 @@ class TestConnection:
             INSERT INTO Freelancer (user_id, headline) VALUES (2,'Developer');
             INSERT INTO Freelancer (user_id, headline) VALUES (4,'Designer');
             INSERT INTO Skill (skill_id,name) VALUES (1,'Python'),(2,'MySQL');
+            INSERT INTO Freelancer_Skill (freelancer_id,skill_id,proficiency_level) VALUES
+              (2,1,5),(2,2,4),(4,2,5);
             INSERT INTO Category (category_id,name) VALUES (1,'Web Development');
             """
         )
@@ -232,6 +235,201 @@ class ApiTests(unittest.TestCase):
     def test_role_boundary(self):
         response = self.client.get("/api/freelancers/me", headers=self.headers(1, "client"))
         self.assertEqual(response.status_code, 403)
+
+    def test_notification_endpoints_are_private_ordered_and_read_idempotent(self):
+        self.assertEqual(self.client.get("/api/notifications").status_code, 401)
+        self.assertEqual(self.client.patch("/api/notifications/1/read", json={}).status_code, 401)
+
+        rows = [
+            (1, "Earlier unread", "message_received", 0, "2026-10-25 09:00:00"),
+            (1, "Latest unread", "task_submitted", 0, "2026-10-26 10:00:00"),
+            (1, "Latest already read", "payment_completed", 1, "2026-10-26 10:00:00"),
+            (2, "Other user's notice", "review_received", 0, "2026-10-26 11:00:00"),
+        ]
+        self.db.raw.executemany(
+            "INSERT INTO Notification (user_id, message, notification_type, is_read, created_at) VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        self.db.raw.commit()
+        user_one = self.headers(1, "client")
+        user_two = self.headers(2, "freelancer")
+        user_zero = self.headers(3, "admin")
+
+        all_notices = self.client.get("/api/notifications", headers=user_one)
+        self.assertEqual(all_notices.status_code, 200)
+        self.assertEqual([n["message"] for n in all_notices.json["notifications"]], [
+            "Latest already read", "Latest unread", "Earlier unread",
+        ])
+        unread = self.client.get("/api/notifications?unread_only=true&limit=1", headers=user_one)
+        self.assertEqual([n["message"] for n in unread.json["notifications"]], ["Latest unread"])
+        self.assertEqual(self.client.get("/api/notifications?unread_only=maybe", headers=user_one).status_code, 400)
+
+        notification_id = all_notices.json["notifications"][1]["notification_id"]
+        self.assertEqual(self.client.patch(f"/api/notifications/{notification_id}/read", headers=user_one, json={}).status_code, 200)
+        # The endpoint is idempotent even when MySQL reports zero changed rows.
+        self.assertEqual(self.client.patch(f"/api/notifications/{notification_id}/read", headers=user_one, json={}).status_code, 200)
+        self.assertEqual(self.client.patch(f"/api/notifications/{notification_id}/read", headers=user_two, json={}).status_code, 404)
+        self.assertEqual(self.client.get("/api/notifications", headers=user_two).json["notifications"][0]["message"], "Other user's notice")
+        remaining = self.client.get("/api/notifications?unread_only=true", headers=user_one)
+        self.assertEqual([n["message"] for n in remaining.json["notifications"]], ["Earlier unread"])
+
+        marked = self.client.patch("/api/notifications/read-all", headers=user_one, json={})
+        self.assertEqual(marked.status_code, 200)
+        self.assertEqual(marked.json["updated"], 1)
+        self.assertEqual(self.client.get("/api/notifications?unread_only=true", headers=user_one).json["notifications"], [])
+        self.assertEqual(self.client.patch("/api/notifications/read-all", headers=user_one, json={}).json["updated"], 0)
+        self.assertEqual(self.client.get("/api/notifications", headers=user_zero).json["notifications"], [])
+        self.assertEqual(self.client.patch("/api/notifications/read-all", headers=user_zero, json={}).json["updated"], 0)
+        self.assertEqual(self.client.patch("/api/notifications/999/read", headers=user_one, json={}).status_code, 404)
+
+    def test_notification_helper_validates_recipient_and_suppresses_retry_duplicates(self):
+        cursor = self.db.cursor()
+        self.assertTrue(add_notification(cursor, 2, "New event #41", "test_event"))
+        self.assertFalse(add_notification(cursor, 2, "New event #41", "test_event"))
+        with self.assertRaises(ValueError):
+            add_notification(cursor, 999, "Invalid recipient", "test_event")
+        self.db.commit()
+        cursor.close()
+        notices = self.client.get("/api/notifications", headers=self.headers(2, "freelancer")).json["notifications"]
+        self.assertEqual(sum(n["message"] == "New event #41" for n in notices), 1)
+
+    def test_project_and_application_notifications_are_automatic_and_targeted(self):
+        client_headers = self.headers(1, "client")
+        freelancer_headers = self.headers(2, "freelancer")
+        other_freelancer_headers = self.headers(4, "freelancer")
+        created = self.client.post("/api/projects", headers=client_headers, json={
+            "title": "Python automation", "description": "Automate a reporting workflow.",
+            "category_id": 1, "budget_min": 300, "budget_max": 700,
+            "project_type": "fixed", "skill_ids": [1],
+        })
+        self.assertEqual(created.status_code, 201)
+        project_id = created.json["project_id"]
+        freelancer_notices = self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]
+        self.assertEqual([n["notification_type"] for n in freelancer_notices], ["project_created"])
+        self.assertIn(f"project #{project_id}", freelancer_notices[0]["message"])
+        self.assertEqual(self.client.get("/api/notifications", headers=other_freelancer_headers).json["notifications"], [])
+        self.assertEqual(self.client.get("/api/notifications", headers=client_headers).json["notifications"], [])
+
+        bid = self.client.post(f"/api/projects/{project_id}/applications", headers=freelancer_headers, json={
+            "proposal": "I can automate this workflow.", "bid_amount": 500, "estimated_days": 8,
+        })
+        self.assertEqual(bid.status_code, 201)
+        client_notices = self.client.get("/api/notifications", headers=client_headers).json["notifications"]
+        self.assertEqual([n["notification_type"] for n in client_notices], ["application_received"])
+        self.assertIn(str(bid.json["application_id"]), client_notices[0]["message"])
+        other_bid = self.client.post(f"/api/projects/{project_id}/applications", headers=other_freelancer_headers, json={
+            "proposal": "I can also deliver this workflow.", "bid_amount": 550, "estimated_days": 9,
+        })
+        self.assertEqual(other_bid.status_code, 201)
+        self.assertEqual(
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=client_headers).json["notifications"]].count("application_received"),
+            2,
+        )
+        duplicate_bid = self.client.post(f"/api/projects/{project_id}/applications", headers=freelancer_headers, json={
+            "proposal": "Retry should be rejected.", "bid_amount": 500, "estimated_days": 8,
+        })
+        self.assertEqual(duplicate_bid.status_code, 409)
+        self.assertEqual(len(self.client.get("/api/notifications", headers=client_headers).json["notifications"]), 2)
+
+        updated = self.client.patch(f"/api/projects/{project_id}", headers=client_headers, json={"budget_max": 800})
+        self.assertEqual(updated.status_code, 200)
+        freelancer_notices = self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]
+        self.assertEqual([n["notification_type"] for n in freelancer_notices].count("project_updated"), 1)
+        self.assertEqual(
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=other_freelancer_headers).json["notifications"]].count("project_updated"),
+            1,
+        )
+        updated_again = self.client.patch(f"/api/projects/{project_id}", headers=client_headers, json={"budget_max": 800})
+        self.assertEqual(updated_again.status_code, 200)
+        self.assertEqual([n["notification_type"] for n in self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]].count("project_updated"), 1)
+
+        accepted = self.client.patch(
+            f"/api/applications/{bid.json['application_id']}/status", headers=client_headers,
+            json={"status": "accepted"},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        freelancer_notices = self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]
+        freelancer_types = [n["notification_type"] for n in freelancer_notices]
+        self.assertIn("contract_created", freelancer_types)
+        self.assertEqual(freelancer_types.count("application_status"), 1)
+        self.assertEqual(
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=other_freelancer_headers).json["notifications"]].count("project_status_changed"),
+            1,
+        )
+        self.assertEqual(
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=client_headers).json["notifications"]].count("application_received"),
+            2,
+        )
+        rejected = self.client.patch(
+            f"/api/applications/{other_bid.json['application_id']}/status", headers=client_headers,
+            json={"status": "rejected"},
+        )
+        self.assertEqual(rejected.status_code, 200)
+        self.assertIn(
+            "application_status",
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=other_freelancer_headers).json["notifications"]],
+        )
+        retry_accept = self.client.patch(
+            f"/api/applications/{bid.json['application_id']}/status", headers=client_headers,
+            json={"status": "accepted"},
+        )
+        self.assertEqual(retry_accept.status_code, 409)
+        self.assertEqual(len(self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]), len(freelancer_notices))
+
+        cancel_project = self.client.post("/api/projects", headers=client_headers, json={
+            "title": "Cancel notification example", "description": "A pending project cancellation test.",
+            "category_id": 1, "budget_min": 100, "budget_max": 250,
+            "project_type": "fixed", "skill_ids": [2],
+        })
+        self.assertEqual(cancel_project.status_code, 201)
+        cancel_project_id = cancel_project.json["project_id"]
+        self.assertEqual(
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=other_freelancer_headers).json["notifications"]].count("project_created"),
+            1,
+        )
+        cancel_bid = self.client.post(f"/api/projects/{cancel_project_id}/applications", headers=other_freelancer_headers, json={
+            "proposal": "I can take this project.", "bid_amount": 200, "estimated_days": 5,
+        })
+        self.assertEqual(cancel_bid.status_code, 201)
+        client_before_cancel = len(self.client.get("/api/notifications", headers=client_headers).json["notifications"])
+        self.assertEqual(self.client.delete(f"/api/projects/{cancel_project_id}", headers=client_headers).status_code, 200)
+        other_types = [n["notification_type"] for n in self.client.get("/api/notifications", headers=other_freelancer_headers).json["notifications"]]
+        self.assertEqual(other_types.count("project_status_changed"), 2)
+        self.assertEqual(len(self.client.get("/api/notifications", headers=client_headers).json["notifications"]), client_before_cancel)
+        self.assertEqual(self.client.delete(f"/api/projects/{cancel_project_id}", headers=client_headers).status_code, 404)
+
+        draft = self.client.post("/api/projects", headers=client_headers, json={
+            "title": "Publish notification example", "description": "A draft that will be published.",
+            "category_id": 1, "budget_min": 100, "budget_max": 250,
+            "project_type": "fixed", "status": "draft", "skill_ids": [1],
+        })
+        self.assertEqual(draft.status_code, 201)
+        self.assertEqual(
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]].count("project_created"),
+            2,
+        )
+        published = self.client.patch(f"/api/projects/{draft.json['project_id']}", headers=client_headers, json={"status": "open"})
+        self.assertEqual(published.status_code, 200)
+        self.assertIn(
+            "project_status_changed",
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]],
+        )
+
+    def test_notification_failure_rolls_back_project_creation(self):
+        before_projects = self.db.raw.execute("SELECT COUNT(*) FROM Project").fetchone()[0]
+        before_notifications = self.db.raw.execute("SELECT COUNT(*) FROM Notification").fetchone()[0]
+        payload = {
+            "title": "Rollback notification test", "description": "This project must not persist.",
+            "category_id": 1, "budget_min": 100, "budget_max": 200,
+            "project_type": "fixed", "skill_ids": [1],
+        }
+        with patch("app.utils.notifications.add_notification", side_effect=RuntimeError("simulated notification insert failure")):
+            failed = self.client.post("/api/projects", headers=self.headers(1, "client"), json=payload)
+        self.assertEqual(failed.status_code, 500)
+        after_projects = self.db.raw.execute("SELECT COUNT(*) FROM Project").fetchone()[0]
+        self.assertEqual(after_projects, before_projects)
+        after_notifications = self.db.raw.execute("SELECT COUNT(*) FROM Notification").fetchone()[0]
+        self.assertEqual(after_notifications, before_notifications)
 
     def test_client_profile_read_and_update(self):
         headers = self.headers(1, "client")
@@ -417,20 +615,30 @@ class ApiTests(unittest.TestCase):
             "proposal": "I can deliver this project.", "bid_amount": 450, "estimated_days": 14,
         })
         self.assertEqual(bid.status_code, 201)
+        client_headers = self.headers(1, "client")
+        self.assertEqual(
+            [n["notification_type"] for n in self.client.get("/api/notifications", headers=client_headers).json["notifications"]],
+            ["application_received"],
+        )
         application_id = bid.json["application_id"]
         duplicate_bid = self.client.post(f"/api/projects/{project_id}/applications", headers=freelancer_headers, json={
             "proposal": "Duplicate bid.", "bid_amount": 460, "estimated_days": 15,
         })
         self.assertEqual(duplicate_bid.status_code, 409)
         self.assertEqual(self.client.get("/api/applications/mine", headers=freelancer_headers).status_code, 200)
-        client_headers = self.headers(1, "client")
         applications = self.client.get(f"/api/projects/{project_id}/applications", headers=client_headers)
         self.assertEqual(len(applications.json["applications"]), 1)
         shortlisted = self.client.patch(f"/api/applications/{application_id}/status", headers=client_headers, json={"status": "shortlisted"})
         self.assertEqual(shortlisted.status_code, 200)
+        client_notices = self.client.get("/api/notifications", headers=client_headers).json["notifications"]
+        self.assertEqual([n["notification_type"] for n in client_notices], ["application_received"])
         accepted = self.client.patch(f"/api/applications/{application_id}/status", headers=client_headers, json={"status": "accepted"})
         self.assertEqual(accepted.status_code, 200)
         contract_id = accepted.json["contract_id"]
+        freelancer_notice_types = [n["notification_type"] for n in self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]]
+        self.assertEqual(freelancer_notice_types.count("application_status"), 2)
+        self.assertEqual(freelancer_notice_types.count("contract_created"), 1)
+        self.assertEqual([n["notification_type"] for n in self.client.get("/api/notifications", headers=client_headers).json["notifications"]], ["application_received"])
         active_review = self.client.post(
             f"/api/contracts/{contract_id}/reviews", headers=client_headers, json={"rating": 5},
         )
@@ -570,6 +778,26 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(messages.json["messages"]), 1)
         read = self.client.patch(f"/api/messages/{message.json['message_id']}/read", headers=freelancer_headers)
         self.assertEqual(read.status_code, 200)
+        client_notices = self.client.get("/api/notifications", headers=client_headers).json["notifications"]
+        client_types = [n["notification_type"] for n in client_notices]
+        self.assertIn("task_submitted", client_types)
+        self.assertIn("milestone_submitted", client_types)
+        self.assertIn("payment_completed", client_types)
+        self.assertIn("review_received", client_types)
+        self.assertIn("dispute_status", client_types)
+        self.assertIn("task_updated", client_types)
+        self.assertNotIn("dispute_opened", client_types)
+        freelancer_notices = self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]
+        freelancer_types = [n["notification_type"] for n in freelancer_notices]
+        for expected_type in (
+            "task_assigned", "task_completed", "milestone_added", "milestone_approved",
+            "payment_pending", "payment_processing", "payment_completed", "contract_completed",
+            "review_received", "message_received", "dispute_opened", "dispute_status",
+        ):
+            self.assertIn(expected_type, freelancer_types)
+        admin_types = [n["notification_type"] for n in self.client.get("/api/notifications", headers=admin_headers).json["notifications"]]
+        self.assertEqual(admin_types.count("dispute_opened"), 1)
+        self.assertEqual(freelancer_types.count("message_received"), 1)
         notices = self.client.get("/api/notifications?unread_only=true", headers=freelancer_headers)
         self.assertGreater(len(notices.json["notifications"]), 0)
         notice_id = notices.json["notifications"][0]["notification_id"]

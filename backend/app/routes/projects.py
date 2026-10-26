@@ -8,7 +8,9 @@ from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from mysql.connector import IntegrityError
 
 from app.db import get_db
-from app.utils.notifications import add_notification
+from app.utils.notifications import (
+    add_notification, notify_matching_freelancers, notify_project_applicants,
+)
 from app.utils.auth import roles_required
 
 projects_bp = Blueprint("projects", __name__)
@@ -113,7 +115,7 @@ def create_project():
         return _bad_request("New projects may start as draft or open.")
     values.setdefault("status", "open")
     connection = get_db()
-    cursor = connection.cursor()
+    cursor = connection.cursor(dictionary=True)
     try:
         _ensure_category_and_skills(cursor, values["category_id"], skill_ids)
         columns = ["client_id", *values]
@@ -124,6 +126,10 @@ def create_project():
         )
         project_id = cursor.lastrowid
         _replace_project_skills(cursor, project_id, skill_ids)
+        if values["status"] == "open" and skill_ids:
+            notify_matching_freelancers(
+                cursor, project_id, int(get_jwt_identity()), values["title"],
+            )
         connection.commit()
     except InvalidProjectReference as error:
         connection.rollback()
@@ -177,7 +183,8 @@ def update_project(project_id):
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(
-            "SELECT project_id, category_id, status, budget_min, budget_max FROM Project "
+            "SELECT project_id, title, description, category_id, status, budget_min, budget_max, "
+            "deadline, project_type FROM Project "
             "WHERE project_id = %s AND client_id = %s FOR UPDATE",
             (project_id, int(get_jwt_identity())),
         )
@@ -199,6 +206,18 @@ def update_project(project_id):
             return _bad_request("Clients may set status to draft, open, or cancelled.")
         if values or skill_ids is not None:
             _ensure_category_and_skills(cursor, category_id, skill_ids or [])
+        old_skill_ids = set()
+        if skill_ids is not None:
+            cursor.execute("SELECT skill_id FROM Project_Skill WHERE project_id = %s", (project_id,))
+            old_skill_ids = {
+                row["skill_id"] if isinstance(row, dict) else row[0]
+                for row in cursor.fetchall()
+            }
+        changed_fields = {
+            key for key, value in values.items()
+            if str(existing.get(key)) != str(value)
+        }
+        skills_changed = skill_ids is not None and old_skill_ids != set(skill_ids)
         if values:
             assignments = ", ".join(f"{column} = %s" for column in values)
             cursor.execute(
@@ -207,6 +226,30 @@ def update_project(project_id):
             )
         if skill_ids is not None:
             _replace_project_skills(cursor, project_id, skill_ids)
+        new_title = values.get("title", existing["title"])
+        if "status" in changed_fields:
+            notify_project_applicants(
+                cursor, project_id, new_title, values["status"]
+            )
+            if values["status"] == "open":
+                notify_matching_freelancers(
+                    cursor, project_id, int(get_jwt_identity()), new_title,
+                    notification_type="project_status_changed",
+                )
+        elif existing["status"] == "open" and (changed_fields - {"status"} or skills_changed):
+            cursor.execute(
+                "SELECT freelancer_id FROM Application WHERE project_id = %s "
+                "AND status IN ('pending','shortlisted') ORDER BY freelancer_id",
+                (project_id,),
+            )
+            for row in cursor.fetchall():
+                freelancer_id = row["freelancer_id"] if isinstance(row, dict) else row[0]
+                add_notification(
+                    cursor,
+                    freelancer_id,
+                    f'Project "{new_title}" (project #{project_id}) has important updates.',
+                    "project_updated",
+                )
         connection.commit()
     except InvalidProjectReference as error:
         connection.rollback()
@@ -224,21 +267,30 @@ def update_project(project_id):
 def cancel_project(project_id):
     """Soft-delete an editable project by setting its status to cancelled."""
     connection = get_db()
-    cursor = connection.cursor()
+    cursor = connection.cursor(dictionary=True)
     try:
+        cursor.execute(
+            "SELECT title FROM Project WHERE project_id = %s AND client_id = %s "
+            "AND status IN ('draft','open') FOR UPDATE",
+            (project_id, int(get_jwt_identity())),
+        )
+        project = cursor.fetchone()
+        if not project:
+            connection.rollback()
+            return _not_found("Editable project was not found.")
         cursor.execute(
             "UPDATE Project SET status = 'cancelled' WHERE project_id = %s AND client_id = %s AND status IN ('draft','open')",
             (project_id, int(get_jwt_identity())),
         )
         changed = cursor.rowcount
+        if changed:
+            notify_project_applicants(cursor, project_id, project["title"], "cancelled")
         connection.commit()
     except Exception:
         connection.rollback()
         raise
     finally:
         cursor.close()
-    if not changed:
-        return _not_found("Editable project was not found.")
     return jsonify(message="Project cancelled."), 200
 
 
@@ -301,19 +353,30 @@ def apply_to_project(project_id):
         return _bad_request("estimated_days must be a whole number from 1 to 65535.")
 
     connection = get_db()
-    cursor = connection.cursor()
+    cursor = connection.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT status FROM Project WHERE project_id = %s", (project_id,))
+        freelancer_id = int(get_jwt_identity())
+        cursor.execute(
+            "SELECT p.status, p.client_id, p.title, u.full_name AS freelancer_name "
+            "FROM Project p JOIN `User` u ON u.user_id = %s WHERE p.project_id = %s",
+            (freelancer_id, project_id),
+        )
         project = cursor.fetchone()
-        if not project or project[0] != "open":
+        if not project or project["status"] != "open":
             connection.rollback()
             return _not_found("Open project was not found.")
         cursor.execute(
             "INSERT INTO Application (project_id, freelancer_id, proposal, bid_amount, estimated_days) "
             "VALUES (%s, %s, %s, %s, %s)",
-            (project_id, int(get_jwt_identity()), proposal.strip(), bid, days),
+            (project_id, freelancer_id, proposal.strip(), bid, days),
         )
         application_id = cursor.lastrowid
+        add_notification(
+            cursor,
+            project["client_id"],
+            f'New application received for "{project["title"]}" from {project["freelancer_name"]} (application #{application_id}).',
+            "application_received",
+        )
         connection.commit()
     except IntegrityError as error:
         connection.rollback()
@@ -356,7 +419,7 @@ def update_application_status(application_id):
     try:
         cursor.execute(
             "SELECT a.application_id, a.project_id, a.freelancer_id, a.bid_amount, "
-            "a.status AS application_status, p.status AS project_status "
+            "a.status AS application_status, p.status AS project_status, p.title AS project_title "
             "FROM Application a JOIN Project p ON p.project_id = a.project_id "
             "WHERE a.application_id = %s AND p.client_id = %s FOR UPDATE",
             (application_id, int(get_jwt_identity())),
@@ -393,12 +456,29 @@ def update_application_status(application_id):
                 (application["project_id"], application_id, contract_amount),
             )
             contract_id = cursor.lastrowid
-        add_notification(
-            cursor,
-            application["freelancer_id"],
-            f"Your application was {next_status}.",
-            "application_status",
-        )
+            add_notification(
+                cursor,
+                application["freelancer_id"],
+                f'Your application for "{application["project_title"]}" (application #{application_id}) was accepted.',
+                "application_status",
+            )
+            add_notification(
+                cursor,
+                application["freelancer_id"],
+                f'Contract #{contract_id} for "{application["project_title"]}" has been created.',
+                "contract_created",
+            )
+            notify_project_applicants(
+                cursor, application["project_id"], application["project_title"],
+                "in_progress", exclude_user_id=application["freelancer_id"],
+            )
+        else:
+            add_notification(
+                cursor,
+                application["freelancer_id"],
+                f'Your application for "{application["project_title"]}" (application #{application_id}) was {next_status}.',
+                "application_status",
+            )
         connection.commit()
     except IntegrityError as error:
         connection.rollback()

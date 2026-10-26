@@ -8,7 +8,7 @@ from flask_jwt_extended import get_jwt, get_jwt_identity
 
 from app.db import get_db
 from app.utils.auth import roles_required
-from app.utils.notifications import add_notification
+from app.utils.notifications import add_notification, notify_project_applicants
 
 execution_bp = Blueprint("execution", __name__)
 CONTRACT_SELECT = (
@@ -103,7 +103,16 @@ def complete_contract(contract_id):
             return _conflict("balance_remaining", "Settle the full contract amount before completing it.")
         cursor.execute("UPDATE Contract SET status = 'completed' WHERE contract_id = %s", (contract_id,))
         cursor.execute("UPDATE Project SET status = 'completed' WHERE project_id = %s", (contract["project_id"],))
-        add_notification(cursor, contract["freelancer_id"], "Your contract has been marked complete.", "contract_completed")
+        add_notification(
+            cursor,
+            contract["freelancer_id"],
+            f'Contract #{contract_id} "{contract["project_title"]}" has been completed.',
+            "contract_completed",
+        )
+        notify_project_applicants(
+            cursor, contract["project_id"], contract["project_title"], "completed",
+            exclude_user_id=contract["freelancer_id"],
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -166,7 +175,12 @@ def create_task(contract_id):
             (contract_id, title.strip(), description, contract["freelancer_id"], due_date),
         )
         task_id = cursor.lastrowid
-        add_notification(cursor, contract["freelancer_id"], "A task was assigned to your contract.", "task_assigned")
+        add_notification(
+            cursor,
+            contract["freelancer_id"],
+            f'Task #{task_id} "{title.strip()}" was assigned to your contract.',
+            "task_assigned",
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -210,7 +224,8 @@ def update_task(task_id):
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(
-            "SELECT t.task_id, t.contract_id, t.assigned_to, t.status, p.client_id, a.freelancer_id, c.status AS contract_status "
+            "SELECT t.task_id, t.contract_id, t.assigned_to, t.status, t.title, t.description, t.due_date, "
+            "p.client_id, a.freelancer_id, c.status AS contract_status "
             "FROM Task t JOIN Contract c ON c.contract_id = t.contract_id "
             "JOIN Project p ON p.project_id = c.project_id "
             "JOIN Application a ON a.application_id = c.application_id "
@@ -254,9 +269,25 @@ def update_task(task_id):
         assignments = ", ".join(f"{column} = %s" for column in values)
         cursor.execute(f"UPDATE Task SET {assignments} WHERE task_id = %s", (*values.values(), task_id))
         if next_status == "submitted":
-            add_notification(cursor, task["client_id"], "A task was submitted for review.", "task_submitted")
+            add_notification(
+                cursor, task["client_id"],
+                f'Task #{task_id} "{task["title"]}" was submitted for review.', "task_submitted",
+            )
+        elif next_status == "in_progress":
+            add_notification(
+                cursor, task["client_id"],
+                f'Task #{task_id} "{task["title"]}" is now in progress.', "task_updated",
+            )
         elif next_status in {"completed", "cancelled"}:
-            add_notification(cursor, task["assigned_to"], f"A task was marked {next_status}.", f"task_{next_status}")
+            add_notification(
+                cursor, task["assigned_to"],
+                f'Task #{task_id} "{task["title"]}" was marked {next_status}.', f"task_{next_status}",
+            )
+        elif any(str(task.get(key)) != str(value) for key, value in values.items()):
+            add_notification(
+                cursor, task["assigned_to"],
+                f'Task #{task_id} "{values.get("title", task["title"])}" details were updated.', "task_updated",
+            )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -331,7 +362,10 @@ def create_milestone(contract_id):
             (contract_id, title.strip(), description, amount, due_date),
         )
         milestone_id = cursor.lastrowid
-        add_notification(cursor, contract["freelancer_id"], "A milestone was added to your contract.", "milestone_added")
+        add_notification(
+            cursor, contract["freelancer_id"],
+            f'Milestone #{milestone_id} "{title.strip()}" was added to your contract.', "milestone_added",
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -348,7 +382,7 @@ def submit_milestone(milestone_id):
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(
-            "SELECT m.status, c.status AS contract_status, a.freelancer_id, p.client_id FROM Milestone m "
+            "SELECT m.status, m.title, c.status AS contract_status, a.freelancer_id, p.client_id FROM Milestone m "
             "JOIN Contract c ON c.contract_id = m.contract_id "
             "JOIN Application a ON a.application_id = c.application_id "
             "JOIN Project p ON p.project_id = c.project_id "
@@ -369,7 +403,10 @@ def submit_milestone(milestone_id):
             "UPDATE Milestone SET status = 'submitted', submitted_at = CURRENT_TIMESTAMP, reviewed_at = NULL WHERE milestone_id = %s",
             (milestone_id,),
         )
-        add_notification(cursor, milestone["client_id"], "A milestone was submitted for review.", "milestone_submitted")
+        add_notification(
+            cursor, milestone["client_id"],
+            f'Milestone #{milestone_id} "{milestone["title"]}" was submitted for review.', "milestone_submitted",
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -390,7 +427,7 @@ def review_milestone(milestone_id):
     cursor = connection.cursor(dictionary=True)
     try:
         cursor.execute(
-            "SELECT m.status, c.status AS contract_status, p.client_id, a.freelancer_id FROM Milestone m "
+            "SELECT m.status, m.title, c.status AS contract_status, p.client_id, a.freelancer_id FROM Milestone m "
             "JOIN Contract c ON c.contract_id = m.contract_id JOIN Project p ON p.project_id = c.project_id "
             "JOIN Application a ON a.application_id = c.application_id "
             "WHERE m.milestone_id = %s FOR UPDATE",
@@ -410,7 +447,10 @@ def review_milestone(milestone_id):
             "UPDATE Milestone SET status = %s, reviewed_at = CURRENT_TIMESTAMP WHERE milestone_id = %s",
             (status, milestone_id),
         )
-        add_notification(cursor, milestone["freelancer_id"], f"Your milestone was {status}.", f"milestone_{status}")
+        add_notification(
+            cursor, milestone["freelancer_id"],
+            f'Milestone #{milestone_id} "{milestone["title"]}" was {status}.', f"milestone_{status}",
+        )
         connection.commit()
     except Exception:
         connection.rollback()

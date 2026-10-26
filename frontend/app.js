@@ -53,6 +53,8 @@
     const logoutRequest = callApi && state.token ? post('/auth/logout',{}) : null;
     state.token=null; state.user=null; state.cache={}; localStorage.removeItem('fmos_token'); localStorage.removeItem('fmos_user');
     authView.classList.remove('d-none'); appView.classList.add('d-none');
+    $('#notificationPanel').classList.add('d-none');
+    $('#notificationList').textContent=''; $('#notificationDot').classList.add('d-none'); $('#notificationBtn').setAttribute('aria-expanded','false');
     $('#loginForm').reset(); $('#registerForm').reset(); $('#forgotPasswordForm').reset();
     authTab('login');
     $('#authAlert').classList.add('d-none');

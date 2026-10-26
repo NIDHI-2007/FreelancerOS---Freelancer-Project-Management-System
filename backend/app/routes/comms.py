@@ -84,7 +84,11 @@ def create_review(contract_id):
             (contract_id, reviewer_id, reviewee_id, rating, comment),
         )
         review_id = cursor.lastrowid
-        add_notification(cursor, reviewee_id, "You received a new contract review.", "review_received")
+        add_notification(
+            cursor, reviewee_id,
+            f"You received a new review for contract #{contract_id} (review #{review_id}).",
+            "review_received",
+        )
         connection.commit()
     except IntegrityError as error:
         connection.rollback()
@@ -152,7 +156,11 @@ def send_message(contract_id):
             (contract_id, identity, receiver_id, text.strip()),
         )
         message_id = cursor.lastrowid
-        add_notification(cursor, receiver_id, "You have a new contract message.", "message_received")
+        add_notification(
+            cursor, receiver_id,
+            f"You received a new message in contract #{contract_id} (message #{message_id}).",
+            "message_received",
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -212,29 +220,41 @@ def list_notifications():
 @comms_bp.patch("/notifications/<int:notification_id>/read")
 @roles_required("client", "freelancer", "admin")
 def mark_notification_read(notification_id):
-    cursor = get_db().cursor()
+    connection = get_db()
+    cursor = connection.cursor()
     try:
         cursor.execute(
             "UPDATE Notification SET is_read = TRUE WHERE notification_id = %s AND user_id = %s",
             (notification_id, int(get_jwt_identity())),
         )
         changed = cursor.rowcount
-        cursor.connection.commit()
+        if not changed:
+            # MySQL reports changed rows by default, so marking an already-read
+            # owned notification may affect zero rows. Keep this operation
+            # idempotent while still hiding notifications owned by other users.
+            cursor.execute(
+                "SELECT 1 FROM Notification WHERE notification_id = %s AND user_id = %s",
+                (notification_id, int(get_jwt_identity())),
+            )
+            owned = cursor.fetchone() is not None
+            if not owned:
+                connection.rollback()
+                return _not_found("Notification was not found.")
+        connection.commit()
     finally:
         cursor.close()
-    if not changed:
-        return _not_found("Notification was not found.")
     return jsonify(notification_id=notification_id, is_read=True), 200
 
 
 @comms_bp.patch("/notifications/read-all")
 @roles_required("client", "freelancer", "admin")
 def mark_all_notifications_read():
-    cursor = get_db().cursor()
+    connection = get_db()
+    cursor = connection.cursor()
     try:
         cursor.execute("UPDATE Notification SET is_read = TRUE WHERE user_id = %s AND is_read = FALSE", (int(get_jwt_identity()),))
         changed = cursor.rowcount
-        cursor.connection.commit()
+        connection.commit()
     finally:
         cursor.close()
     return jsonify(updated=changed), 200

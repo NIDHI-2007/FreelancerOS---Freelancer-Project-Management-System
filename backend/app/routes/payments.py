@@ -131,7 +131,11 @@ def create_payment(contract_id):
             (contract_id, milestone_id, contract["client_id"], contract["freelancer_id"], amount, payment_method),
         )
         payment_id = cursor.lastrowid
-        add_notification(cursor, contract["freelancer_id"], "A payment has been initiated for your contract.", "payment_pending")
+        add_notification(
+            cursor, contract["freelancer_id"],
+            f'Payment #{payment_id} has been initiated for contract #{contract_id}.',
+            "payment_pending",
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -214,13 +218,13 @@ def update_payment_status(payment_id):
         add_notification(
             cursor,
             payment["payee_id"],
-            f"A payment is now {status}.",
+            f"Payment #{payment_id} is now {status}.",
             f"payment_{status}",
         )
         add_notification(
             cursor,
             payment["payer_id"],
-            f"Your payment is now {status}.",
+            f"Payment #{payment_id} is now {status}.",
             f"payment_{status}",
         )
         connection.commit()
