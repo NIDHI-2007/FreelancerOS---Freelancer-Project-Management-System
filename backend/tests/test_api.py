@@ -438,6 +438,16 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/api/clients/me", headers=headers)
         self.assertEqual(response.json["profile"]["company_name"], "Northstar")
 
+    def test_account_profile_update_for_client_freelancer_and_admin(self):
+        for user_id, role in ((1, "client"), (2, "freelancer"), (3, "admin")):
+            response = self.client.patch(
+                "/api/users/me", headers=self.headers(user_id, role),
+                json={"full_name": f"Updated {role.title()}", "email": f"{role}@example.test"},
+            )
+            self.assertEqual(response.status_code, 200, role)
+            current = self.client.get("/api/users/me", headers=self.headers(user_id, role))
+            self.assertEqual(current.json["user"]["full_name"], f"Updated {role.title()}")
+
     def test_freelancer_profile_and_skills(self):
         headers = self.headers(2, "freelancer")
         response = self.client.patch("/api/freelancers/me", headers=headers, json={"hourly_rate": 45, "experience_years": 4})
@@ -615,6 +625,17 @@ class ApiTests(unittest.TestCase):
             "proposal": "I can deliver this project.", "bid_amount": 450, "estimated_days": 14,
         })
         self.assertEqual(bid.status_code, 201)
+        freelancer_projects = self.client.get("/api/projects", headers=freelancer_headers)
+        listed_project = next(p for p in freelancer_projects.json["projects"] if p["project_id"] == project_id)
+        self.assertTrue(listed_project["has_applied"])
+        self.assertEqual(listed_project["application_status"], "pending")
+        self.assertNotIn("application_status", self.client.get("/api/projects").json["projects"][0])
+        other_freelancer_projects = self.client.get("/api/projects", headers=self.headers(4, "freelancer"))
+        other_view = next(p for p in other_freelancer_projects.json["projects"] if p["project_id"] == project_id)
+        self.assertFalse(other_view["has_applied"])
+        self.assertIsNone(other_view["application_status"])
+        detail = self.client.get(f"/api/projects/{project_id}", headers=freelancer_headers)
+        self.assertEqual(detail.json["project"]["application_status"], "pending")
         client_headers = self.headers(1, "client")
         self.assertEqual(
             [n["notification_type"] for n in self.client.get("/api/notifications", headers=client_headers).json["notifications"]],
@@ -634,6 +655,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual([n["notification_type"] for n in client_notices], ["application_received"])
         accepted = self.client.patch(f"/api/applications/{application_id}/status", headers=client_headers, json={"status": "accepted"})
         self.assertEqual(accepted.status_code, 200)
+        accepted_application = next(
+            a for a in self.client.get("/api/applications/mine", headers=freelancer_headers).json["applications"]
+            if a["application_id"] == application_id
+        )
+        self.assertEqual(accepted_application["status"], "accepted")
         contract_id = accepted.json["contract_id"]
         freelancer_notice_types = [n["notification_type"] for n in self.client.get("/api/notifications", headers=freelancer_headers).json["notifications"]]
         self.assertEqual(freelancer_notice_types.count("application_status"), 2)

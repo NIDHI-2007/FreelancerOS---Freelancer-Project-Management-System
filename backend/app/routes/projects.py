@@ -54,6 +54,8 @@ def list_categories():
 
 @projects_bp.get("/projects")
 def search_projects():
+    verify_jwt_in_request(optional=True)
+    identity = get_jwt_identity()
     filters, error = _search_filters()
     if error:
         return error
@@ -70,6 +72,7 @@ def search_projects():
         cursor.execute(query, (*params, filters["limit"], filters["offset"]))
         projects = cursor.fetchall()
         _load_project_skills(cursor, projects)
+        _attach_my_application_status(cursor, projects, identity)
     except ValueError as error:
         if str(error) == "project_type":
             return _bad_request("project_type must be fixed or hourly.")
@@ -162,6 +165,7 @@ def get_project(project_id):
             if viewer["role"] != "admin" and not (viewer["role"] == "client" and int(identity) == project["client_id"]):
                 return _not_found("Project was not found.")
         _load_project_skills(cursor, [project])
+        _attach_my_application_status(cursor, [project], identity)
     finally:
         cursor.close()
     return jsonify(project=project), 200
@@ -592,6 +596,35 @@ def _load_project_skills(cursor, projects):
     by_id = {project_id: project for project_id, project in zip(project_ids, projects)}
     for row in cursor.fetchall():
         by_id[row["project_id"]]["required_skills"].append({"skill_id": row["skill_id"], "name": row["name"]})
+
+
+def _attach_my_application_status(cursor, projects, identity):
+    """Expose only the authenticated freelancer's own application state."""
+    if not identity or not projects:
+        return
+    cursor.execute(
+        "SELECT role, account_status FROM `User` WHERE user_id = %s",
+        (int(identity),),
+    )
+    viewer = cursor.fetchone()
+    if not viewer or viewer["role"] != "freelancer" or viewer["account_status"] != "active":
+        return
+
+    project_ids = [project["project_id"] for project in projects]
+    for project in projects:
+        project["has_applied"] = False
+        project["application_status"] = None
+    placeholders = ", ".join(["%s"] * len(project_ids))
+    cursor.execute(
+        f"SELECT project_id, status FROM Application "
+        f"WHERE freelancer_id = %s AND project_id IN ({placeholders})",
+        (int(identity), *project_ids),
+    )
+    statuses = {row["project_id"]: row["status"] for row in cursor.fetchall()}
+    for project in projects:
+        status = statuses.get(project["project_id"])
+        project["has_applied"] = status is not None
+        project["application_status"] = status
 
 
 def _validate_project(body, partial=False):

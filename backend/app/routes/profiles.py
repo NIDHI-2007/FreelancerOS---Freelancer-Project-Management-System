@@ -106,14 +106,15 @@ def create_portfolio_item():
             return _bad_request(f"{key} must be a string or null.")
     if body.get("project_url") is not None and len(body["project_url"]) > 2048:
         return _bad_request("project_url is limited to 2048 characters.")
-    cursor = get_db().cursor()
+    connection = get_db()
+    cursor = connection.cursor()
     try:
         cursor.execute(
             "INSERT INTO Portfolio (freelancer_id, title, description, project_url) VALUES (%s, %s, %s, %s)",
             (int(get_jwt_identity()), body["title"].strip(), body.get("description"), body.get("project_url")),
         )
         item_id = cursor.lastrowid
-        cursor.connection.commit()
+        connection.commit()
     finally:
         cursor.close()
     return jsonify(portfolio_id=item_id), 201
@@ -133,14 +134,15 @@ def update_portfolio_item(item_id):
     if "project_url" in body and body["project_url"] is not None and (not isinstance(body["project_url"], str) or len(body["project_url"]) > 2048):
         return _bad_request("project_url must be a string of at most 2048 characters or null.")
     assignments = ", ".join(f"{key} = %s" for key in body)
-    cursor = get_db().cursor()
+    connection = get_db()
+    cursor = connection.cursor()
     try:
         cursor.execute(
             f"UPDATE Portfolio SET {assignments} WHERE portfolio_id = %s AND freelancer_id = %s",
             (*[body[key].strip() if key == "title" else body[key] for key in body], item_id, int(get_jwt_identity())),
         )
         changed = cursor.rowcount
-        cursor.connection.commit()
+        connection.commit()
     finally:
         cursor.close()
     if not changed:
@@ -151,14 +153,15 @@ def update_portfolio_item(item_id):
 @profiles_bp.delete("/freelancers/me/portfolio/<int:item_id>")
 @roles_required("freelancer")
 def delete_portfolio_item(item_id):
-    cursor = get_db().cursor()
+    connection = get_db()
+    cursor = connection.cursor()
     try:
         cursor.execute(
             "DELETE FROM Portfolio WHERE portfolio_id = %s AND freelancer_id = %s",
             (item_id, int(get_jwt_identity())),
         )
         deleted = cursor.rowcount
-        cursor.connection.commit()
+        connection.commit()
     finally:
         cursor.close()
     if not deleted:
@@ -181,13 +184,14 @@ def _get_profile(table, user_id, fields):
 
 def _update_profile(table, user_id, body):
     assignments = ", ".join(f"{key} = %s" for key in body)
-    cursor = get_db().cursor()
+    connection = get_db()
+    cursor = connection.cursor()
     try:
         cursor.execute(
             f"UPDATE {table} SET {assignments} WHERE user_id = %s",
             (*[body[key] for key in body], user_id),
         )
-        cursor.connection.commit()
+        connection.commit()
     finally:
         cursor.close()
     return jsonify(message="Profile updated."), 200

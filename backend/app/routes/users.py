@@ -53,15 +53,16 @@ def update_me():
         values["full_name"] = body["full_name"].strip()
 
     assignments = ", ".join(f"{column} = %s" for column in values)
-    cursor = get_db().cursor()
+    connection = get_db()
+    cursor = connection.cursor()
     try:
         cursor.execute(
             f"UPDATE `User` SET {assignments} WHERE user_id = %s",
             (*values.values(), int(get_jwt_identity())),
         )
-        cursor.connection.commit()
+        connection.commit()
     except IntegrityError as error:
-        cursor.connection.rollback()
+        connection.rollback()
         if error.errno == 1062:
             return jsonify(error={"code": "email_already_registered", "message": "An account with this email already exists."}), 409
         raise
